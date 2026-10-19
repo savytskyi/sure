@@ -23,15 +23,23 @@ class WiseAccount::Processor
 
   private
 
+    # Wise's balance snapshot is authoritative for the current balance. It is
+    # recorded as the account's current anchor (a valuation, not a
+    # transaction), so incomplete history never turns into invented income or
+    # expense; earlier anchors become reconciliation points. A balance Wise no
+    # longer lists has no current snapshot and keeps its last one.
     def process_account!
       account = wise_account.current_account
+      return unless wise_account.active?
+
       balance = wise_account.current_balance || 0
 
-      account.update!(
-        balance: balance,
-        cash_balance: balance,
-        currency: wise_account.currency
-      )
+      account.update!(cash_balance: balance, currency: wise_account.currency)
+      result = account.set_current_balance(balance)
+      return if result.success?
+
+      Rails.logger.warn "WiseAccount::Processor - Could not set current balance for wise_account #{wise_account.id}: #{result.error}"
+      account.update!(balance: balance)
     end
 
     def process_transactions
