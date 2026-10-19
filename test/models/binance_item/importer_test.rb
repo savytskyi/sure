@@ -8,11 +8,14 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
     @item = BinanceItem.create!(family: @family, name: "B", api_key: "k", api_secret: "s")
     @provider = mock
     @provider.stubs(:get_spot_price).returns("50000.0")
+    @provider.stubs(:get_wallet_balances).returns([])
+    @provider.stubs(:get_api_restrictions).returns({ "enableReading" => true })
 
     stub_spot_result([ { symbol: "BTC", free: "1.0", locked: "0.0", total: "1.0" } ])
     stub_margin_result([])
     stub_earn_result([])
     stub_futures_result([])
+    stub_coin_futures_result([])
   end
 
   test "creates a binance_account of type combined" do
@@ -66,6 +69,7 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
     stub_failed_result("margin")
     stub_failed_result("earn")
     stub_failed_result("futures")
+    stub_failed_result("coin_futures")
 
     assert_raises BinanceItem::Importer::AllRequestsFailed do
       BinanceItem::Importer.new(@item, binance_provider: @provider).import
@@ -148,6 +152,75 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
     assert_equal 0, ba.current_balance.to_d
   end
 
+  # The integration only saw USD-denominated balances before: BTC posted as
+  # COIN-M collateral was missing from the account entirely.
+  test "COIN-M BTC collateral counts at its equity, and positions add nothing" do
+    stub_coin_futures_result(
+      [ { symbol: "BTC", free: "0.8325", locked: "0.0175", total: "0.86512097",
+          wallet_balance: "0.85", unrealized_pnl: "0.01512097", margin_balance: "0.86512097" } ],
+      positions: [ coin_perp ],
+      summary: { "assets" => { "BTC" => { "wallet_balance" => "0.85", "margin_balance" => "0.86512097" } },
+                 "open_positions" => 1, "notional" => { "BTC" => "0.48387097" } }
+    )
+
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    ba = @item.binance_accounts.first
+    # 1 BTC spot + 0.86512097 BTC equity at 50,000; the -300 contract
+    # (0.48 BTC notional) short is exposure and adds nothing.
+    assert_in_delta 93_256.05, ba.current_balance.to_f, 0.01
+    assert_equal %w[spot coin_futures], ba.raw_payload["assets"].map { |a| a["source"] }
+    assert_equal "0.86512097", ba.raw_payload.dig("futures_summary", "coin_m", "assets", "BTC", "margin_balance")
+
+    position = @item.derivative_positions.sole
+    assert position.open?
+    assert_equal "coin_m", position.market
+    assert_equal ba, position.provider_account
+    assert_equal BigDecimal("-300"), position.quantity
+  end
+
+  test "a futures market that does not answer keeps its positions open and its summary marked stale" do
+    stub_coin_futures_result([ { symbol: "BTC", total: "0.5" } ], positions: [ coin_perp ], summary: { "open_positions" => 1 })
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    stub_failed_result("coin_futures")
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    assert @item.derivative_positions.sole.open?, "an outage is not a closed position"
+    summary = @item.binance_accounts.first.reload.raw_payload.dig("futures_summary", "coin_m")
+    assert summary["stale"]
+    assert_equal 1, summary["open_positions"]
+    assert_includes payload_symbols, "BTC"
+  end
+
+  test "a futures market that answers without the position closes it" do
+    stub_coin_futures_result([ { symbol: "BTC", total: "0.5" } ], positions: [ coin_perp ])
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    stub_coin_futures_result([ { symbol: "BTC", total: "0.5" } ], positions: [])
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    assert @item.derivative_positions.sole.closed?
+  end
+
+  test "records Binance's wallet valuation and the key's permissions for checking" do
+    @provider.stubs(:get_wallet_balances).returns([ { "walletName" => "COIN-M Futures", "balance" => "43256.05", "activate" => true } ])
+    @provider.stubs(:get_api_restrictions).returns({ "enableReading" => true, "enableWithdrawals" => false })
+
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    assert_equal "COIN-M Futures", @item.reload.raw_payload["wallet_overview"].first["walletName"]
+    assert_equal false, @item.raw_payload.dig("api_restrictions", "enableWithdrawals")
+  end
+
+  test "an unavailable wallet valuation does not fail the import" do
+    @provider.stubs(:get_wallet_balances).raises(Provider::Binance::PermissionError, "no")
+
+    BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+    assert_equal "no", @item.reload.raw_payload.dig("wallet_overview", "error")
+  end
+
   test "stores source breakdown in raw_payload" do
     BinanceItem::Importer.new(@item, binance_provider: @provider).import
 
@@ -170,7 +243,8 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
 
     def stub_failed_result(source)
       klass = { "spot" => BinanceItem::SpotImporter, "margin" => BinanceItem::MarginImporter,
-                "earn" => BinanceItem::EarnImporter, "futures" => BinanceItem::FuturesImporter }.fetch(source)
+                "earn" => BinanceItem::EarnImporter, "futures" => BinanceItem::FuturesImporter,
+                "coin_futures" => BinanceItem::CoinFuturesImporter }.fetch(source)
       klass.any_instance.stubs(:import).returns(
         { assets: [], raw: nil, source: source, error: "boom" }
       )
@@ -197,6 +271,19 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
     def stub_futures_result(assets)
       BinanceItem::FuturesImporter.any_instance.stubs(:import).returns(
         { assets: assets, raw: {}, source: "futures" }
+      )
+    end
+
+    def coin_perp
+      { symbol: "BTCUSD_PERP", position_side: "BOTH", quantity: BigDecimal("-300"), quantity_unit: "contracts",
+        contract_size: 100, contract_size_currency: "USD", margin_asset: "BTC", entry_price: 64000,
+        notional: BigDecimal("-0.48387097"), notional_currency: "BTC",
+        unrealized_pnl: BigDecimal("0.01512097"), unrealized_pnl_currency: "BTC" }
+    end
+
+    def stub_coin_futures_result(assets, positions: nil, summary: nil)
+      BinanceItem::CoinFuturesImporter.any_instance.stubs(:import).returns(
+        { assets: assets, raw: {}, source: "coin_futures", market: "coin_m", positions: positions, summary: summary }
       )
     end
 end

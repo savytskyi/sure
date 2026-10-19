@@ -4,7 +4,18 @@ class Provider::Binance
 
   class Error < StandardError; end
   class AuthenticationError < Error; end
-  class RateLimitError < Error; end
+  # Binance answers -2015 both for a wrong key and for a key that may not read
+  # a product (a key created before the futures account was opened, or an IP
+  # not on the key's allow list), so the message says which product refused.
+  class PermissionError < AuthenticationError; end
+  class RateLimitError < Error
+    attr_reader :retry_after
+
+    def initialize(message = "Rate limit exceeded", retry_after: nil)
+      super(message)
+      @retry_after = retry_after
+    end
+  end
   class ApiError < Error; end
   class InvalidSymbolError < ApiError; end
 
@@ -14,15 +25,34 @@ class Provider::Binance
   # in an URL (e.g. https://user:password@host).
   SPOT_BASE_URL = "https://api.binance.com".freeze
   FUTURES_BASE_URL = "https://fapi.binance.com".freeze
+  COIN_FUTURES_BASE_URL = "https://dapi.binance.com".freeze
+
+  # -2014/-2015: key format or key/IP/permission rejected; -1022: bad signature.
+  PERMISSION_ERROR_CODES = [ -2014, -2015, -1022 ].freeze
+  # -1003: too many requests (sent with 429, or 418 once the IP is banned).
+  RATE_LIMIT_ERROR_CODES = [ -1003 ].freeze
 
   base_uri SPOT_BASE_URL
   default_options.merge!({ timeout: 30 }.merge(httparty_ssl_options))
 
-  attr_reader :api_key, :api_secret
+  attr_reader :api_key, :api_secret, :used_weight
 
   def initialize(api_key:, api_secret:)
     @api_key = api_key
     @api_secret = api_secret
+    @used_weight = {}
+  end
+
+  # What the key may do (reading, futures, withdrawals, ...). Read-only.
+  def get_api_restrictions
+    signed_get("/sapi/v1/account/apiRestrictions")
+  end
+
+  # Binance's own valuation of every wallet (Spot, Funding, USDⓈ-M Futures,
+  # COIN-M Futures, Earn, ...) in quote_asset. Used to reconcile what was
+  # imported, never as a balance itself.
+  def get_wallet_balances(quote_asset: "USDT")
+    signed_get("/sapi/v1/asset/wallet/balance", extra_params: { "quoteAsset" => quote_asset })
   end
 
   # Spot wallet — requires signed request
@@ -92,9 +122,54 @@ class Provider::Binance
     signed_get("/api/v3/myTrades", extra_params: params)
   end
 
-  # USDⓈ-M Futures account — requires signed request
+  # USDⓈ-M Futures account — requires signed request. V3 lists only the
+  # quote assets and the symbols with a position or open order; V2 is the
+  # fallback for an account V3 does not serve.
   def get_futures_account
+    signed_get("/fapi/v3/account", base_url: FUTURES_BASE_URL)
+  rescue ApiError => e
+    raise if e.is_a?(InvalidSymbolError)
+
+    Rails.logger.warn("Provider::Binance: /fapi/v3/account failed (#{e.message}); retrying /fapi/v2/account")
     signed_get("/fapi/v2/account", base_url: FUTURES_BASE_URL)
+  end
+
+  # USDⓈ-M open positions with entry, break-even, mark and liquidation prices.
+  def get_futures_position_risk
+    signed_get("/fapi/v3/positionRisk", base_url: FUTURES_BASE_URL)
+  end
+
+  # USDⓈ-M wallet movements (REALIZED_PNL, FUNDING_FEE, COMMISSION, TRANSFER,
+  # ...). Binance keeps three months; start_time/end_time are inclusive ms.
+  def get_futures_income(start_time:, end_time:, limit: 1000)
+    signed_get("/fapi/v1/income", base_url: FUTURES_BASE_URL, extra_params: {
+      "startTime" => start_time.to_s, "endTime" => end_time.to_s, "limit" => limit.to_s
+    })
+  end
+
+  # COIN-M Futures account: coin-margined wallet balances (BTC, ETH, ...) and
+  # unrealized P&L, all denominated in the margin coin.
+  def get_coin_futures_account
+    signed_get("/dapi/v1/account", base_url: COIN_FUTURES_BASE_URL)
+  end
+
+  # COIN-M positions; positionAmt is in contracts, notionalValue in the coin.
+  def get_coin_futures_position_risk
+    signed_get("/dapi/v1/positionRisk", base_url: COIN_FUTURES_BASE_URL)
+  end
+
+  # COIN-M wallet movements, including DELIVERED_SETTELMENT (sic) for dated
+  # contracts. A request may span at most a year.
+  def get_coin_futures_income(start_time:, end_time:, limit: 1000)
+    signed_get("/dapi/v1/income", base_url: COIN_FUTURES_BASE_URL, extra_params: {
+      "startTime" => start_time.to_s, "endTime" => end_time.to_s, "limit" => limit.to_s
+    })
+  end
+
+  # Public: contract size, margin asset and delivery date per COIN-M symbol.
+  def get_coin_futures_exchange_info
+    response = self.class.get("/dapi/v1/exchangeInfo", base_uri: COIN_FUTURES_BASE_URL)
+    handle_response(response)
   end
 
   # Futures trade history for a single symbol
@@ -174,19 +249,47 @@ class Provider::Binance
 
     def handle_response(response)
       parsed = response.parsed_response
+      record_used_weight(response)
+      code = parsed["code"] if parsed.is_a?(Hash)
 
       case response.code
       when 200..299
         parsed
-      when 401
-        raise AuthenticationError, extract_error_message(parsed) || "Unauthorized"
-      when 429
-        raise RateLimitError, "Rate limit exceeded"
+      when 429, 418
+        raise RateLimitError.new(
+          "Rate limit exceeded#{' (IP banned)' if response.code == 418}: #{extract_error_message(parsed)}",
+          retry_after: retry_after(response)
+        )
       else
         msg = extract_error_message(parsed) || "API error: #{response.code}"
-        raise InvalidSymbolError, msg if parsed.is_a?(Hash) && parsed["code"] == -1121
+        raise PermissionError, msg if PERMISSION_ERROR_CODES.include?(code)
+        raise AuthenticationError, msg if response.code == 401
+        raise RateLimitError.new(msg, retry_after: retry_after(response)) if RATE_LIMIT_ERROR_CODES.include?(code)
+        raise InvalidSymbolError, msg if code == -1121
         raise ApiError, msg
       end
+    end
+
+    # X-MBX-USED-WEIGHT-1M (and friends), per host, so a caller can slow
+    # down before Binance answers 429.
+    def record_used_weight(response)
+      return unless response.respond_to?(:headers) && response.headers
+
+      response.headers.each do |name, value|
+        next unless name.to_s.downcase.start_with?("x-mbx-used-weight")
+
+        host = response.respond_to?(:request) ? response.request&.uri&.host : nil
+        @used_weight[[ host, name.to_s.downcase ]] = Array(value).first.to_i
+      end
+    rescue StandardError
+      nil
+    end
+
+    def retry_after(response)
+      return nil unless response.respond_to?(:headers) && response.headers
+
+      value = response.headers["retry-after"] || response.headers["Retry-After"]
+      Array(value).first&.to_i
     end
 
     def extract_error_message(parsed)

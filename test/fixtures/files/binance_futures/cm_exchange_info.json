@@ -1,0 +1,11 @@
+{
+  "timezone": "UTC",
+  "symbols": [
+    { "symbol": "BTCUSD_PERP", "pair": "BTCUSD", "contractType": "PERPETUAL", "deliveryDate": 4133404800000,
+      "contractStatus": "TRADING", "contractSize": 100, "marginAsset": "BTC", "baseAsset": "BTC", "quoteAsset": "USD" },
+    { "symbol": "BTCUSD_261225", "pair": "BTCUSD", "contractType": "CURRENT_QUARTER", "deliveryDate": 1798185600000,
+      "contractStatus": "TRADING", "contractSize": 100, "marginAsset": "BTC", "baseAsset": "BTC", "quoteAsset": "USD" },
+    { "symbol": "ETHUSD_PERP", "pair": "ETHUSD", "contractType": "PERPETUAL", "deliveryDate": 4133404800000,
+      "contractStatus": "TRADING", "contractSize": 10, "marginAsset": "ETH", "baseAsset": "ETH", "quoteAsset": "USD" }
+  ]
+}

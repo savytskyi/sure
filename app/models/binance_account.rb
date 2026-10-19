@@ -15,6 +15,8 @@ class BinanceAccount < ApplicationRecord
   has_one :account_provider, as: :provider, dependent: :destroy
   has_one :account, through: :account_provider, source: :account
   has_one :linked_account, through: :account_provider, source: :account
+  has_many :derivative_positions, as: :provider_account, dependent: :nullify
+  has_many :derivative_ledger_events, as: :provider_account, dependent: :nullify
 
   validates :name, :currency, presence: true
 

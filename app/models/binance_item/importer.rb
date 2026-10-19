@@ -8,6 +8,9 @@ class BinanceItem::Importer
   # reporting a successful import of nothing.
   class AllRequestsFailed < StandardError; end
 
+  SOURCES = %w[spot margin earn futures coin_futures].freeze
+  FUTURE_MARKETS = { "futures" => "usds_m", "coin_futures" => "coin_m" }.freeze
+
   attr_reader :binance_item, :binance_provider
 
   def initialize(binance_item, binance_provider:)
@@ -22,8 +25,9 @@ class BinanceItem::Importer
     margin_result = BinanceItem::MarginImporter.new(binance_item, provider: binance_provider).import
     earn_result   = BinanceItem::EarnImporter.new(binance_item, provider: binance_provider).import
     futures_result = BinanceItem::FuturesImporter.new(binance_item, provider: binance_provider).import
+    coin_futures_result = BinanceItem::CoinFuturesImporter.new(binance_item, provider: binance_provider).import
 
-    results = [ spot_result, margin_result, earn_result, futures_result ]
+    results = [ spot_result, margin_result, earn_result, futures_result, coin_futures_result ]
     all_assets = results.flat_map { |result| tagged_assets(result) }
 
     if results.all? { |result| result[:error].present? }
@@ -47,20 +51,27 @@ class BinanceItem::Importer
 
     total_usd = calculate_total_usd(all_assets)
 
-    upsert_binance_account(
+    binance_account = upsert_binance_account(
       all_assets: all_assets,
       total_usd: total_usd,
       spot_raw: spot_result[:raw],
       margin_raw: margin_result[:raw],
       earn_raw: earn_result[:raw],
-      futures_raw: futures_result[:raw]
+      futures_raw: futures_result[:raw],
+      coin_futures_raw: coin_futures_result[:raw],
+      futures_results: [ futures_result, coin_futures_result ]
     )
+
+    reconcile_positions(binance_account, [ futures_result, coin_futures_result ])
 
     binance_item.upsert_binance_snapshot!({
       "spot" => spot_result[:raw],
       "margin" => margin_result[:raw],
       "earn" => earn_result[:raw],
       "futures" => futures_result[:raw],
+      "coin_futures" => coin_futures_result[:raw],
+      "wallet_overview" => fetch_optional { binance_provider.get_wallet_balances },
+      "api_restrictions" => fetch_optional { binance_provider.get_api_restrictions },
       "imported_at" => Time.current.iso8601
     })
 
@@ -70,6 +81,38 @@ class BinanceItem::Importer
   end
 
   private
+
+    # Reference data for checking the import (Binance's own per-wallet
+    # valuation, the key's permissions). Never a reason to fail the sync.
+    def fetch_optional
+      yield
+    rescue StandardError => e
+      Rails.logger.info "BinanceItem::Importer #{binance_item.id} - optional request failed: #{e.message}"
+      { "error" => e.message }
+    end
+
+    # Only a market whose positions were read in full may close episodes.
+    def reconcile_positions(binance_account, results)
+      results.each do |result|
+        next if result[:error].present? || result[:positions].nil?
+
+        DerivativePosition.reconcile!(
+          item: binance_item, provider_key: "binance", market: market_of(result),
+          reported: result[:positions], provider_account: binance_account,
+          account: binance_account.current_account
+        )
+      end
+    rescue StandardError => e
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "error",
+        message: "Binance futures positions could not be stored",
+        source: self.class.name,
+        provider_key: "binance",
+        family: binance_item.family,
+        metadata: { binance_item_id: binance_item.id, error_class: e.class.name, error: e.message }
+      )
+    end
 
     def tagged_assets(result)
       result[:assets].map { |a| a.merge(source: result[:source]) }
@@ -139,8 +182,9 @@ class BinanceItem::Importer
       0
     end
 
-    def upsert_binance_account(all_assets:, total_usd:, spot_raw:, margin_raw:, earn_raw:, futures_raw:)
+    def upsert_binance_account(all_assets:, total_usd:, spot_raw:, margin_raw:, earn_raw:, futures_raw:, coin_futures_raw:, futures_results:)
       ba = binance_item.binance_accounts.find_or_initialize_by(account_type: "combined")
+      previous_futures = ba.raw_payload&.dig("futures_summary") || {}
 
       ba.assign_attributes(
         name: binance_item.institution_name.presence || "Binance",
@@ -152,6 +196,8 @@ class BinanceItem::Importer
           "margin" => margin_raw,
           "earn" => earn_raw,
           "futures" => futures_raw,
+          "coin_futures" => coin_futures_raw,
+          "futures_summary" => futures_summary(futures_results, previous_futures),
           "assets" => all_assets.map(&:stringify_keys),
           "fetched_at" => Time.current.iso8601
         }
@@ -161,8 +207,28 @@ class BinanceItem::Importer
       ba
     end
 
+    # Wallet, equity, available margin, unrealized P&L and notional exposure
+    # per futures market, kept apart from the asset list so none of them is
+    # mistaken for a balance. A market that did not answer keeps its last
+    # summary, marked stale.
+    def futures_summary(results, previous)
+      results.to_h do |result|
+        summary = if result[:error].present?
+          (previous[market_of(result)] || {}).merge("stale" => true, "error" => result[:error], "error_class" => result[:error_class])
+        else
+          (result[:summary] || {}).merge("read_at" => Time.current.iso8601)
+        end
+
+        [ market_of(result), summary ]
+      end
+    end
+
+    def market_of(result)
+      result[:market] || FUTURE_MARKETS.fetch(result[:source])
+    end
+
     def build_institution_metadata(all_assets)
-      %w[spot margin earn futures].each_with_object({}) do |source, hash|
+      SOURCES.each_with_object({}) do |source, hash|
         source_assets = all_assets.select { |a| a[:source] == source }
         hash[source] = {
           "asset_count" => source_assets.size,

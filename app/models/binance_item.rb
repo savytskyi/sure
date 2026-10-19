@@ -21,6 +21,8 @@ class BinanceItem < ApplicationRecord
 
   has_many :binance_accounts, dependent: :destroy
   has_many :accounts, through: :binance_accounts
+  has_many :derivative_positions, as: :item, dependent: :delete_all
+  has_many :derivative_ledger_events, as: :item, dependent: :delete_all
 
   scope :active, -> { where(scheduled_for_deletion: false) }
   scope :syncable, -> { active }

@@ -1,0 +1,25 @@
+{
+  "totalWalletBalance": "1250.50000000",
+  "totalUnrealizedProfit": "-12.25000000",
+  "totalMarginBalance": "1238.25000000",
+  "availableBalance": "980.00000000",
+  "assets": [
+    { "asset": "USDT", "walletBalance": "1000.00000000", "unrealizedProfit": "-12.25000000", "marginBalance": "987.75000000",
+      "maintMargin": "4.10000000", "initialMargin": "120.00000000", "positionInitialMargin": "120.00000000",
+      "openOrderInitialMargin": "0.00000000", "crossWalletBalance": "1000.00000000", "crossUnPnl": "-12.25000000",
+      "availableBalance": "867.75000000", "maxWithdrawAmount": "867.75000000", "updateTime": 1760860800000 },
+    { "asset": "USDC", "walletBalance": "250.50000000", "unrealizedProfit": "0.00000000", "marginBalance": "250.50000000",
+      "maintMargin": "0.00000000", "initialMargin": "0.00000000", "positionInitialMargin": "0.00000000",
+      "openOrderInitialMargin": "0.00000000", "crossWalletBalance": "250.50000000", "crossUnPnl": "0.00000000",
+      "availableBalance": "250.50000000", "maxWithdrawAmount": "250.50000000", "updateTime": 1760860800000 },
+    { "asset": "BTC", "walletBalance": "0.00000000", "unrealizedProfit": "0.00000000", "marginBalance": "0.00000000",
+      "maintMargin": "0.00000000", "initialMargin": "0.00000000", "positionInitialMargin": "0.00000000",
+      "openOrderInitialMargin": "0.00000000", "crossWalletBalance": "0.00000000", "crossUnPnl": "0.00000000",
+      "availableBalance": "0.00000000", "maxWithdrawAmount": "0.00000000", "updateTime": 0 }
+  ],
+  "positions": [
+    { "symbol": "ETHUSDT", "positionSide": "BOTH", "positionAmt": "0.500", "unrealizedProfit": "-12.25000000",
+      "isolatedMargin": "0", "notional": "1200.00000000", "isolatedWallet": "0", "initialMargin": "120.00000000",
+      "maintMargin": "4.10000000", "updateTime": 1760860800000 }
+  ]
+}

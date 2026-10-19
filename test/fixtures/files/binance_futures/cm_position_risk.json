@@ -1,0 +1,10 @@
+[
+  { "symbol": "BTCUSD_PERP", "positionAmt": "-300", "entryPrice": "64000.0", "breakEvenPrice": "63980.5",
+    "markPrice": "62000.00000000", "unRealizedProfit": "0.01512097", "liquidationPrice": "0", "leverage": "3",
+    "maxQty": "100", "marginType": "cross", "isolatedMargin": "0.00000000", "isAutoAddMargin": "false",
+    "positionSide": "BOTH", "notionalValue": "-0.48387097", "isolatedWallet": "0", "updateTime": 1760860800000 },
+  { "symbol": "ETHUSD_PERP", "positionAmt": "0", "entryPrice": "0.0", "breakEvenPrice": "0.0",
+    "markPrice": "2400.00000000", "unRealizedProfit": "0.00000000", "liquidationPrice": "0", "leverage": "20",
+    "maxQty": "1000", "marginType": "cross", "isolatedMargin": "0.00000000", "isAutoAddMargin": "false",
+    "positionSide": "BOTH", "notionalValue": "0", "isolatedWallet": "0", "updateTime": 0 }
+]

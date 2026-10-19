@@ -1,0 +1,10 @@
+[
+  { "symbol": "ETHUSDT", "positionSide": "BOTH", "positionAmt": "0.500", "entryPrice": "2424.50", "breakEvenPrice": "2425.71",
+    "markPrice": "2400.00000000", "unRealizedProfit": "-12.25000000", "liquidationPrice": "0", "isolatedMargin": "0",
+    "notional": "1200.00000000", "marginAsset": "USDT", "isolatedWallet": "0", "initialMargin": "120.00000000",
+    "maintMargin": "4.10000000", "positionInitialMargin": "120.00000000", "openOrderInitialMargin": "0",
+    "adl": 1, "bidNotional": "0", "askNotional": "0", "updateTime": 1760860800000 },
+  { "symbol": "SOLUSDC", "positionSide": "BOTH", "positionAmt": "0", "entryPrice": "0.0", "breakEvenPrice": "0.0",
+    "markPrice": "180.00000000", "unRealizedProfit": "0.00000000", "liquidationPrice": "0", "isolatedMargin": "0",
+    "notional": "0", "marginAsset": "USDC", "isolatedWallet": "0", "updateTime": 0 }
+]

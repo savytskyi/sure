@@ -103,6 +103,44 @@ class BinanceAccount::HoldingsProcessorTest < ActiveSupport::TestCase
     assert_empty held_tickers, "the emptied wallet still reported holdings"
   end
 
+  # Sure keeps one holding per security and day. BTC in Spot and BTC posted
+  # as COIN-M collateral used to be written one after the other, and the
+  # second replaced the first, so the account showed only part of its BTC.
+  test "the same coin in several wallets is one holding of the summed quantity" do
+    ExchangeRate.stubs(:find_or_fetch_rate).returns(nil)
+    @family.update!(currency: "USD")
+    @account.update!(currency: "USD")
+    Security.find_or_create_by!(ticker: "CRYPTO:BTC") do |s|
+      s.name = "BTC"
+      s.exchange_operating_mic = "XBNC"
+    end
+    BinanceAccount::HoldingsProcessor.any_instance.stubs(:fetch_price).with("BTC").returns(60_000.0)
+    @ba.update!(raw_payload: { "assets" => [
+      { "symbol" => "BTC", "total" => "0.5", "source" => "spot" },
+      { "symbol" => "BTC", "total" => "0.86512097", "source" => "coin_futures" }
+    ] })
+
+    BinanceAccount::HoldingsProcessor.new(@ba).process
+
+    holding = @account.holdings.where(date: Date.current).sole
+    assert_equal BigDecimal("1.36512097"), holding.qty
+    assert_in_delta 81_907.26, holding.amount, 0.01
+    assert_equal "binance_BTC_spot+coin_futures_#{Date.current}", holding.external_id
+  end
+
+  test "a coin held in one wallet keeps its existing external id" do
+    ExchangeRate.stubs(:find_or_fetch_rate).returns(nil)
+    Security.find_or_create_by!(ticker: "CRYPTO:BTC") do |s|
+      s.name = "BTC"
+      s.exchange_operating_mic = "XBNC"
+    end
+    BinanceAccount::HoldingsProcessor.any_instance.stubs(:fetch_price).with("BTC").returns(60_000.0)
+
+    BinanceAccount::HoldingsProcessor.new(@ba).process
+
+    assert_equal "binance_BTC_spot_#{Date.current}", @account.holdings.where(date: Date.current).sole.external_id
+  end
+
   private
     def seed_rate_and_securities
       ExchangeRate.create!(from_currency: "USD", to_currency: "EUR",
