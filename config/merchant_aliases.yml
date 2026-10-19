@@ -1,0 +1,45 @@
+# Deterministic merchant-name normalization for provider imports
+# (Merchant::NameNormalizer). The original description is never modified;
+# only the merchant a transaction is linked to uses the normalized name.
+#
+# Evaluation order for a raw merchant name:
+#   1. exact - case-insensitive exact match on the whole raw name
+#   2. rules - the first rule with a matching pattern (case-insensitive regex)
+#   3. fallback - basic cleanup: collapse whitespace, drop payment-processor
+#      prefixes (SQ *, SUMUP *, PAYPAL *) and trailing store numbers/locations,
+#      title-case ALL-CAPS names
+#
+# Ported from the homelab financial-data merchant rules. Add aliases freely.
+
+exact:
+  "Tfl.gov.uk/cp": Transport for London
+
+rules:
+  - name: Lidl
+    patterns: ['^LIDL\b']
+  - name: Spotify
+    patterns: ['^SPOTIFY\b', '\*SPOTIFY']
+  - name: Amazon
+    patterns: ['^AMZN\b', '^AMAZON\b', 'AMZN MKTP', '\bAMAZON\.\w+']
+  - name: Apple
+    patterns: ['^APPLE\.COM', '^APPLE\b']
+  - name: Google
+    patterns: ['^GOOGLE\b', '^GOOGLE\*']
+  - name: Netflix
+    patterns: ['^NETFLIX']
+  - name: Mercator
+    patterns: ['^MERCATOR\b']
+  - name: Hofer
+    patterns: ['^HOFER\b']
+  - name: Spar
+    patterns: ['^(INTER)?SPAR\b']
+  - name: Petrol
+    patterns: ['^PETROL\b']
+  - name: Uber
+    patterns: ['^UBER\b', '^UBER\*']
+  - name: Bolt
+    patterns: ['^BOLT\b', '^BOLT\.EU']
+  - name: OpenAI
+    patterns: ['^OPENAI\b', 'CHATGPT']
+  - name: Anthropic
+    patterns: ['^ANTHROPIC\b', 'CLAUDE\.AI']
