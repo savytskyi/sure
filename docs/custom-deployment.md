@@ -1,7 +1,8 @@
 # Deploying the custom Sure image (fork runbook)
 
 How this fork is validated, built, deployed to the homelab and rolled back.
-What the custom code does is in [custom-wise-integration.md](custom-wise-integration.md).
+What the custom code does is in [custom-wise-integration.md](custom-wise-integration.md)
+and [custom-binance-integration.md](custom-binance-integration.md).
 
 **Never run builds, the test suite or migration tests on the production Docker
 daemon.** It is a single 12-CPU / 8 GB VM shared with the whole homelab; a
@@ -15,11 +16,11 @@ manual dispatch, on GitHub-hosted runners only:
 | Job | What it does |
 |---|---|
 | `ci` | Calls the upstream `ci.yml` unchanged: Brakeman, importmap audit, Rubocop, Biome, full Rails suite, system tests |
-| `wise` | Wise and provider-ledger tests alone (fast signal) |
-| `migrations` | Loads the schema of the release production runs (`baseline_ref`, default `v0.7.5-hotfix.2`), records exactly that release's migrations, applies every newer one, compares the result with `db/schema.rb`, reverses and reapplies this fork's migration, and boots the baseline release's code against the migrated database |
+| `wise` | Wise, provider-ledger, Binance futures, derivative and Kraken tests alone (fast signal) |
+| `migrations` | Loads the schema of the release production runs (`baseline_ref`, default `v0.7.5-hotfix.2`), records exactly that release's migrations, applies every newer one, compares the result with `db/schema.rb`, reverses and reapplies this fork's two migrations, and boots the baseline release's code against the migrated database |
 | `image` | After the three jobs pass: builds the production `Dockerfile` for linux/amd64, tags it `ghcr.io/<owner>/sure:<commit sha>`, smoke-tests it. Pushes **only** on a manual run with `publish: true` |
 
-No Wise, Sure or other credentials are used; publishing uses the workflow's
+No Wise, Binance, Sure or other credentials are used; publishing uses the workflow's
 own `GITHUB_TOKEN`. Actions must be enabled for the fork (Settings → Actions).
 Upstream's `publish.yml` only runs for `main`, version tags and its schedule
 (schedules are disabled in forks by default); it is left untouched. Opening a
@@ -53,7 +54,7 @@ homelab in once with a token that has only `read:packages`:
 
 ## Database migrations from v0.7.5-hotfix.2
 
-Production's schema is at `2026_09_29_120000`. This branch adds 16 migrations.
+Production's schema is at `2026_09_29_120000`. This branch adds 17 migrations.
 Three upstream ones are dated *before* that version but are not part of the
 release, so `db:migrate` runs them too.
 
@@ -75,6 +76,7 @@ release, so `db:migrate` runs them too.
 | 20261013180000 AddDeviceIdToTradeRepublicItems | schema | yes | NOT NULL column with generated default |
 | 20261015090000 AddSessionExpiresAtToTradeRepublicItems | schema | yes | nullable column |
 | 20261019120000 AddWiseLedgerProvenance (this fork) | schema | yes | new table + nullable/defaulted columns |
+| 20261019150000 CreateDerivativePositionsAndLedgerEvents (this fork) | schema | yes | two new tables (`derivative_positions`, `derivative_ledger_events`); touches no existing table |
 
 **Old image against the migrated schema:** validated (in CI and locally):
 every one of the v0.7.5-hotfix.2 release's 164 models loads against the
@@ -117,7 +119,7 @@ Never against production. On a machine other than the production Docker host
 4. With this branch checked out, the production encryption keys in the
    environment (from the homelab `.env`, never committed) and
    `DATABASE_URL=postgres://…:55432/sure_restore RAILS_ENV=production`:
-   `bin/rails db:migrate:status` (expect the 16 pending above), then
+   `bin/rails db:migrate:status` (expect the 17 pending above), then
    `bin/rails db:migrate`.
 5. Re-run step 3 and compare; then `bin/rails runner 'puts Account.count, Entry.count'`.
 6. Boot the old release against the migrated copy: `git worktree add ../sure-0.7.5 v0.7.5-hotfix.2`,
@@ -125,6 +127,39 @@ Never against production. On a machine other than the production Docker host
 7. Optional: start the new image against the copy with
    `-e DATABASE_URL=…` and no Redis/worker, and open it on a private port.
 8. Drop the copy (`dropdb -p 55432 sure_restore`) and delete the dump.
+
+### Restored-copy validation (2026-10-19)
+
+Backup `20261019-122758` (taken manually: the 03:30 launchd run failed with
+`docker: command not found`, see below), restored into an isolated
+PostgreSQL 17.11 on a private port on the Mac — not the Docker daemon:
+
+* Checksums OK. `pg_restore` reports 30 errors, all TimescaleDB extension
+  metadata (`_timescaledb_catalog`, `timescaledb`, `timescaledb_toolkit`),
+  which Sure does not use; `pg_dump` warns about circular keys in
+  `continuous_agg`, also TimescaleDB's own catalog.
+* All 152 tables: row counts identical to live production.
+* Counts query: all zero (no Kraken, Trade Republic, pending transfers,
+  invalid rates, rules, or Binance futures fills). Production has **no**
+  provider connections; 6 manual accounts, 284 entries.
+* 17 pending migrations applied in under a second. Afterwards: only the
+  four new empty tables and 17 `schema_migrations` rows differ; account
+  balances (13,676.86 over 6 accounts), entries (284, sum 26,302.86) and
+  net worth (−18,735.06 EUR) unchanged.
+* `db:schema:dump` of the migrated copy equals `db/schema.rb` except the
+  PostgreSQL-version formatting of one upstream Sophtron CHECK constraint.
+* Both fork migrations reversed and reapplied cleanly.
+
+### Backup job
+
+`~/Library/LaunchAgents/com.ky.sure-backup.plist` runs `backup-sure.sh` with
+launchd's minimal `PATH`, which does not contain `docker`
+(`/usr/local/bin`), so the scheduled run fails and the last automatic
+backup is 2026-10-18 11:08. Fix (not applied): add
+`export PATH="/usr/local/bin:$HOME/.docker/bin:$PATH"` near the top of the
+script, or an `EnvironmentVariables` → `PATH` key in the plist, then
+`launchctl kickstart -k gui/$(id -u)/com.ky.sure-backup` and check
+`~/homelab/sure-backup.log`.
 
 ## Deployment (not yet performed)
 
@@ -140,7 +175,9 @@ Never against production. On a machine other than the production Docker host
    explicitly shows the output and stops on error).
 6. **Start**: `docker compose up -d sure-web`, then `sure-worker`.
 7. **Health**: `docker compose ps` (both healthy), `curl -fsS http://127.0.0.1:3030/up`,
-   `docker logs --since 5m sure-web | grep -i -E "error|fatal"`.
+   `docker logs --since 5m sure-web | grep -i -E "error|fatal"`,
+   `docker exec sure-web bin/rails runner 'puts Account.count, Entry.count, Account.sum(:balance)'`
+   (expect the values recorded before step 3).
 8. **First Wise sync, manually**: pause automatic syncing (Settings → turn
    off auto-sync, or keep the worker stopped until step 9 is done and run
    the sync from a console), then trigger it per Wise connection and watch
@@ -157,7 +194,16 @@ Never against production. On a machine other than the production Docker host
    run `wise:legacy_exclude FAMILY_ID=<id>` (dry run), then with
    `CONFIRM=yes`, and check `wise:reconcile` again. Resolve or dismiss what
    `wise:review` lists (mainly jar moves into closed jars).
-10. **Enable automatic syncing** again.
+10. **Binance (only when a connection is added or exists)**: create the key
+    with Enable Reading only, after the futures accounts were opened. Connect
+    it with auto-sync still off, run one sync, then
+    `docker exec sure-web bin/rails binance:futures`: every futures market
+    should be read (not STALE), the key flags should show no permission
+    beyond reading, and Binance's wallet valuation should match the
+    imported sources. `binance:legacy_futures_trades` reports fills an older
+    version recorded as spot trades (none today). Income backfill completes
+    over a few syncs (`backfill_complete=true` per market).
+11. **Enable automatic syncing** again.
 
 ## Rollback
 
@@ -168,7 +214,10 @@ Never against production. On a machine other than the production Docker host
   code runs on the migrated schema and finds every entry it created under
   its original id; entries the new sync added (card payments, incoming
   payments, …) stay as they are, and excluded legacy entries stay
-  excluded.
+  excluded. For Binance, the old code ignores the two derivative tables
+  and the `binance_derivatives_*` entries (zero-amount trades) stay; it
+  would resume reading only USDⓈ-M, recording new futures fills as spot
+  trades and writing one holding per wallet.
 * **Application and database** (data migrations touched rows, or a clean
   state is wanted): stop both containers, then
   `docker exec -i timescaledb pg_restore -U postgres --clean --if-exists -d sure_production < <backup>/sure_production.dump`,
