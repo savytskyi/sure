@@ -129,6 +129,9 @@ class WiseActivity::Processor
     def extra
       {
         wise: {
+          source: "activity",
+          # Jar activities state the amount; the balance comes from routing rules.
+          provenance: "inferred",
           activity_id: activity[:id],
           activity_type: activity_type,
           resource_type: activity.dig(:resource, :type),

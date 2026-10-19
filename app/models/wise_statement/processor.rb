@@ -116,6 +116,9 @@ class WiseStatement::Processor
     def extra
       {
         wise: {
+          source: "statement",
+          # A balance statement states both the amount and the balance.
+          provenance: "provider_explicit",
           statement_id: transaction_id,
           statement_type: statement[:type],
           reference: statement[:referenceNumber],

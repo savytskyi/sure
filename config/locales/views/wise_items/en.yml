@@ -7,6 +7,10 @@ en:
     entries:
       default_name: Wise transaction
       fee_name: Wise fee
+    ledger:
+      batch_payment: "Batch payment: %{name}"
+      cash_withdrawal: Cash withdrawal
+      conversion: Converted %{from} to %{to}
     activities:
       jar_deposit: Transfer to Jar
       jar_withdrawal: Transfer from Jar

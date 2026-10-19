@@ -36,6 +36,7 @@ class WiseItem < ApplicationRecord
 
   has_many :wise_accounts, dependent: :destroy
   has_many :accounts, through: :wise_accounts
+  has_many :ledger_records, class_name: "ProviderLedgerRecord", as: :item, dependent: :delete_all
 
   scope :active, -> { where(scheduled_for_deletion: false) }
   scope :syncable, -> { active }
@@ -70,6 +71,40 @@ class WiseItem < ApplicationRecord
     end
 
     results
+  end
+
+  # Imports activity-reconstructed legs (card payments, incoming and outgoing
+  # payments, conversions, batches) into linked accounts, then links
+  # movements between own balances as transfers. Relationships span every
+  # Wise connection of the family (personal and business profiles).
+  def process_ledger_records
+    linker = WiseItem::LedgerLinker.new(family)
+    linker.annotate!
+    result = WiseItem::LedgerProcessor.new(self).process
+    linker.link_transfers!
+    result
+  end
+
+  def checkpoint(resource)
+    sync_checkpoints[resource.to_s] || {}
+  end
+
+  # Merges into one resource's checkpoint; others are left as they are.
+  def update_checkpoint!(resource, attributes)
+    reload_checkpoints = self.class.where(id: id).pick(:sync_checkpoints) || {}
+    merged = reload_checkpoints.merge(resource.to_s => (reload_checkpoints[resource.to_s] || {}).merge(attributes))
+    update!(sync_checkpoints: merged)
+  end
+
+  # Statement checkpoints are per balance, so one failing balance never
+  # loses or blocks another's progress.
+  def statement_coverage(balance_id)
+    checkpoint("statements")[balance_id.to_s]
+  end
+
+  def update_statement_checkpoint!(balance_id, attributes)
+    statements = checkpoint("statements")
+    update_checkpoint!("statements", balance_id.to_s => (statements[balance_id.to_s] || {}).merge(attributes))
   end
 
   # Finds interbalance entry pairs (JAR inflow ↔ STANDARD outflow) and links them as Transfers.
@@ -183,8 +218,10 @@ class WiseItem < ApplicationRecord
     wise_accounts.joins(:account_provider).count
   end
 
+  # Closed and discovered (no longer listed) balances can be linked to keep
+  # their history, but never block setup.
   def unlinked_accounts_count
-    wise_accounts.left_joins(:account_provider).where(account_providers: { id: nil }).count
+    wise_accounts.active.left_joins(:account_provider).where(account_providers: { id: nil }).count
   end
 
   def total_accounts_count

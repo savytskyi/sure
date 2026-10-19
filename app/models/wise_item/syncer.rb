@@ -43,6 +43,10 @@ class WiseItem::Syncer
       sync_errors.concat(result_failure_errors(process_results, category: :account_processing_error, message_key: :account_processing_failed))
       capture_transaction_processing_summary(process_results)
 
+      ledger_result = wise_item.process_ledger_records
+      sync_errors << sync_error(:transaction_import_error, :transactions_failed, count: ledger_result.failed) if ledger_result.failed.positive?
+      capture_ledger_summary(sync, ledger_result)
+
       wise_item.link_jar_transfers!
 
       # Phase 4: Schedule balance calculations
@@ -141,6 +145,36 @@ class WiseItem::Syncer
       )
     rescue => e
       Rails.logger.warn "WiseItem::Syncer - Failed to capture transaction processing summary: #{e.message}"
+    end
+
+    # Provenance counts for this connection's reconstructed Wise ledger, so
+    # what was imported, inferred or left for review is visible per sync.
+    def capture_ledger_summary(sync, result)
+      counts = wise_item.ledger_records.where.not(category: "transfer_order").group(:status, :provenance).count
+      by_status = counts.each_with_object(Hash.new(0)) { |((status, _), count), totals| totals[status] += count }
+      by_provenance = counts.each_with_object(Hash.new(0)) { |((status, provenance), count), totals| totals[provenance] += count unless status == "excluded" }
+
+      if sync.respond_to?(:sync_stats)
+        merge_sync_stats(sync, {
+          "wise_ledger_imported" => result.imported,
+          "wise_ledger_needs_review" => by_status["needs_review"],
+          "wise_ledger_provider_explicit" => by_provenance["provider_explicit"],
+          "wise_ledger_inferred" => by_provenance["inferred"],
+          "wise_ledger_unresolved" => by_provenance["unresolved"]
+        })
+      end
+
+      DebugLogEntry.capture(
+        category: result.failed.positive? ? "provider_sync_error" : "provider_sync",
+        level: result.failed.positive? ? "warn" : "info",
+        message: "WiseItem::Syncer - Wise ledger: #{result.imported} imported, #{by_status['needs_review']} need review",
+        source: self.class.name,
+        provider_key: "wise",
+        family: wise_item.family,
+        metadata: { wise_item_id: wise_item.id, run: result.to_h, statuses: by_status, provenance: by_provenance }
+      )
+    rescue => e
+      Rails.logger.warn "WiseItem::Syncer - Failed to capture ledger summary: #{e.message}"
     end
 
     def sync_error(category, message_key, **options)
