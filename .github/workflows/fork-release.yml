@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow_failed_tests:
+        description: "Emergency publish despite CI/provider failures (migrations must pass)"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -222,6 +227,15 @@ jobs:
 
   image:
     needs: [ ci, wise, migrations ]
+    if: >-
+      ${{
+        always() &&
+        needs.migrations.result == 'success' &&
+        (
+          (needs.ci.result == 'success' && needs.wise.result == 'success') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish && inputs.allow_failed_tests)
+        )
+      }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -234,6 +248,12 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           persist-credentials: false
+
+      - name: Record emergency publication override
+        if: ${{ inputs.allow_failed_tests }}
+        run: |
+          echo "::warning::Image publication was explicitly allowed despite failed CI/provider tests; migration validation still passed."
+          echo "⚠️ Published with the explicit allow_failed_tests override." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
