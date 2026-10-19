@@ -10,7 +10,8 @@
 # - wise: the Wise, provider-ledger, Binance futures and Kraken tests on
 #   their own, for a fast signal
 # - image: builds the production image for linux/amd64 and smoke-tests it;
-#   publishes it only on a manual run with `publish: true`
+#   publishes only on a manual run with `publish: true` or an explicitly pushed
+#   `emergency-deploy-*` tag (which still requires migration validation)
 #
 # Runs on GitHub-hosted runners only. Uses no Wise, Sure or other credentials;
 # publishing uses the workflow's own GITHUB_TOKEN.
@@ -20,6 +21,8 @@ on:
   push:
     branches:
       - "feature/**"
+    tags:
+      - "emergency-deploy-*"
   workflow_dispatch:
     inputs:
       baseline_ref:
@@ -233,7 +236,8 @@ jobs:
         needs.migrations.result == 'success' &&
         (
           (needs.ci.result == 'success' && needs.wise.result == 'success') ||
-          (github.event_name == 'workflow_dispatch' && inputs.publish && inputs.allow_failed_tests)
+          (github.event_name == 'workflow_dispatch' && inputs.publish && inputs.allow_failed_tests) ||
+          startsWith(github.ref, 'refs/tags/emergency-deploy-')
         )
       }}
     runs-on: ubuntu-24.04
@@ -250,7 +254,7 @@ jobs:
           persist-credentials: false
 
       - name: Record emergency publication override
-        if: ${{ inputs.allow_failed_tests }}
+        if: ${{ inputs.allow_failed_tests || startsWith(github.ref, 'refs/tags/emergency-deploy-') }}
         run: |
           echo "::warning::Image publication was explicitly allowed despite failed CI/provider tests; migration validation still passed."
           echo "⚠️ Published with the explicit allow_failed_tests override." >> "$GITHUB_STEP_SUMMARY"
@@ -284,7 +288,7 @@ jobs:
           docker image inspect "$IMAGE:${GITHUB_SHA}" --format 'size={{.Size}} arch={{.Architecture}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
 
       - name: Log in to GHCR
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) || startsWith(github.ref, 'refs/tags/emergency-deploy-') }}
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ghcr.io
@@ -292,7 +296,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish the SHA-tagged image
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) || startsWith(github.ref, 'refs/tags/emergency-deploy-') }}
         run: |
           docker push "$IMAGE:${GITHUB_SHA}"
           digest=$(docker image inspect "$IMAGE:${GITHUB_SHA}" --format '{{index .RepoDigests 0}}')
