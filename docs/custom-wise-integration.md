@@ -141,7 +141,10 @@ entry; never recreated).
   the time, else review.
 * **Kinds**: jar moves, conversions, top-ups (`BALANCE_DEPOSIT`) and payments
   to accounts Wise marks as the customer's own are funds movements even with
-  one leg, so they never inflate income or expense.
+  one leg, so they never inflate income or expense. An incoming payment whose
+  transfer the receiving profile created itself (a pay-in; 194 on the live
+  data) stays an ordinary incoming payment: Wise does not say who paid it in.
+  Reclassify with `wise:classify` where it is your own money.
 
 ### Merchants
 
@@ -245,6 +248,16 @@ personal data); the results:
   `ownedByCustomer`, `details.balanceId`/`targetProfile`).
 * The same 3,102 balance-affecting legs as the reference. For all 2,976
   legs both import, amount, balance and fee agree exactly.
+* A live run (2026-10-19) against Wise with both profiles, in a disposable
+  instance, upgraded from the v0.7.5-hotfix.2 connector exactly like
+  production, reproduced the same matrix: 3,164 legs imported (every entry on
+  the linked account with the leg's amount), 208/208 fees, 1,732 card
+  payments all with a merchant (316 merchants), 84 conversions linked as
+  transfers, 0 new entries on repeated syncs, and the Wise balance as the
+  current anchor on every listed balance. After the legacy cleanup below,
+  business CHF and personal USD reconcile to 0.00 against Wise; the gaps on
+  the other balances are covered by legs still in review (mainly jar moves
+  into jars Wise no longer lists).
 * Differences, all intended: 30 card payments with an explicitly stated
   debit are `inferred` here (the balance is still inferred; the reference
   calls them exact), so exact is 342 here vs 372; 29 jar moves into a main
@@ -278,7 +291,8 @@ bin/rails wise:classify RECORD_ID=<uuid> AS=salary|income|expense|internal_trans
 bin/rails wise:dismiss RECORD_ID=<uuid> # never import one leg
 bin/rails wise:closed_balances          # closed / no-longer-listed balances and their accounts
 bin/rails wise:reconcile                # Wise balance vs imported ledger, per account
-bin/rails wise:legacy_entries           # old fallback/conversion entries
+bin/rails wise:legacy_report [OUT=...]  # old connector entries with proposed corrections
+bin/rails wise:legacy_exclude FAMILY_ID=... [CONFIRM=yes]  # dry run unless confirmed
 ```
 
 In Docker: `docker exec sure-web bin/rails wise:coverage`.
@@ -287,7 +301,30 @@ In Docker: `docker exec sure-web bin/rails wise:coverage`.
 
 Entries the old code created stay, with their ids. Reconstructed legs adopt
 the ones that describe the same movement; the old payload rows are kept but
-no longer processed. Entries the old code booked on the wrong balance
+no longer processed. The rest are **double counts until reviewed**: the old
+connector booked every transfer order (including cancelled ones and every
+member of a batch) as its own entry, by currency. On the live data, of 1,800
+old entries 766 were adopted, and the report proposes excluding 1,017:
+
+| Finding | Live count | Proposed |
+|---|---|---|
+| `batch_member_counted_in_batch_debit` | 696 | exclude (the batch debit is the movement) |
+| `duplicate_of_reconstructed_leg` | 157 | exclude |
+| `cancelled_transfer` (never funded) | 151 | exclude |
+| `refunded_transfer` | 8 | exclude |
+| `misrouted_conversion_or_jar_move` (wrong balance) | 5 | exclude |
+| `duplicate_fee` | 0 | exclude |
+| `no_reconstructed_leg` | 17 | review by hand |
+| `adopted_user_modified_differs` | 0 | review by hand |
+
+```sh
+bin/rails wise:legacy_report OUT=/rails/storage/wise-legacy.csv   # read-only, one row per entry
+bin/rails wise:legacy_exclude FAMILY_ID=<id>                        # dry run: what would be excluded
+bin/rails wise:legacy_exclude FAMILY_ID=<id> CONFIRM=yes [FINDINGS=cancelled_transfer,...]
+```
+
+Exclusion is reversible (include the entry again from the transaction page)
+and nothing is deleted. Entries the old code booked on the wrong balance
 (a conversion as an outflow on every balance, a transfer on both currency
 balances) are not deleted automatically; `wise:legacy_entries` lists the
 candidates for manual cleanup.
@@ -341,6 +378,10 @@ Likely conflicts and how to resolve them:
   tables, keep both; ours is additive only.
 
 ## Build, deploy, roll back
+
+The complete runbook (CI, image, migration classification, restored-copy
+test, deployment and rollback) is [custom-deployment.md](custom-deployment.md);
+this section is the short version.
 
 Production (`~/homelab/compose.yml`) runs `ghcr.io/we-promise/sure:stable`
 for `sure-web` and `sure-worker`, with PostgreSQL in `timescaledb` and
