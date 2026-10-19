@@ -18,13 +18,13 @@
 #   Never imported.
 #
 # No FX rate, fee, balance or counterpart leg is ever invented. Ported from
-# the homelab financial-data project (providers/wise/provisional*.py).
-# Same-currency jar moves, jar interest and jar fees are not handled here;
-# WiseActivity::Processor imports those from the jar's own payload.
+# the homelab financial-data project (providers/wise/provisional*.py), plus
+# jar moves and balance interest/fees, which that project leaves unassigned.
 class WiseItem::LedgerReconstructor
   CARD_TYPES = %w[CARD_PAYMENT CASH_WITHDRAWAL].freeze
-  JAR_ONLY_TYPES = %w[BALANCE_CASHBACK BALANCE_ASSET_FEE].freeze
-  KNOWN_TYPES = (CARD_TYPES + %w[CARD_CHECK TRANSFER BALANCE_DEPOSIT INTERBALANCE BATCH_TRANSFER]).freeze
+  # Interest credited to, and fees charged on, a balance.
+  BALANCE_CHARGE_TYPES = { "BALANCE_CASHBACK" => "interest", "BALANCE_ASSET_FEE" => "balance_fee", "BALANCE_HOLD_FEE" => "balance_fee" }.freeze
+  KNOWN_TYPES = (CARD_TYPES + BALANCE_CHARGE_TYPES.keys + %w[CARD_CHECK TRANSFER BALANCE_DEPOSIT INTERBALANCE BATCH_TRANSFER]).freeze
   CONTRADICTS_COMPLETED = [ "pending", "declined", "cancelled", "canceled", "in progress" ].freeze
   BATCH_WINDOW = 15.minutes
   BALANCE_PAY_IN = "BALANCE"
@@ -73,13 +73,8 @@ class WiseItem::LedgerReconstructor
     secondary.currency.present? && primary.currency.present? && secondary.currency != primary.currency
   end
 
-  # Handled by the jar sync (WiseActivity::Processor), not here.
-  def self.jar_activity?(activity)
-    JAR_ONLY_TYPES.include?(activity["type"]) || (activity["type"] == "INTERBALANCE" && !conversion?(activity))
-  end
-
   def legs(activities)
-    sorted = activities.sort_by { |activity| [ activity["createdOn"].to_s, activity["id"].to_s ] }
+    sorted = activities.uniq { |activity| activity["id"] }.sort_by { |activity| [ activity["createdOn"].to_s, activity["id"].to_s ] }
     @own_activity_transfer_ids = sorted.filter_map do |activity|
       activity.dig("resource", "id").to_s if activity["type"] == "TRANSFER" && activity.dig("resource", "type") == "TRANSFER"
     end.to_set
@@ -91,7 +86,7 @@ class WiseItem::LedgerReconstructor
     attr_reader :registry
 
     def legs_for(activity)
-      return [] if activity["id"].blank? || self.class.jar_activity?(activity)
+      return [] if activity["id"].blank?
 
       type = activity["type"].to_s
       status = activity["status"].to_s
@@ -112,7 +107,9 @@ class WiseItem::LedgerReconstructor
       elsif type == "TRANSFER"
         [ outgoing_leg(activity) ]
       elsif type == "INTERBALANCE"
-        conversion_legs(activity)
+        self.class.conversion?(activity) ? conversion_legs(activity) : jar_move_legs(activity)
+      elsif BALANCE_CHARGE_TYPES.key?(type)
+        [ balance_charge_leg(activity) ]
       elsif type == "BATCH_TRANSFER"
         batch_legs(activity)
       else
@@ -153,7 +150,8 @@ class WiseItem::LedgerReconstructor
       when "CARD_PAYMENT", "CARD_CHECK" then "card_payment"
       when "CASH_WITHDRAWAL" then "cash_withdrawal"
       when "BATCH_TRANSFER" then "batch_payment"
-      when "INTERBALANCE" then "currency_conversion"
+      when "INTERBALANCE" then self.class.conversion?(activity) ? "currency_conversion" : "jar_move"
+      when *BALANCE_CHARGE_TYPES.keys then BALANCE_CHARGE_TYPES[activity["type"]]
       when "BALANCE_DEPOSIT" then "incoming_payment"
       when "TRANSFER" then activity["primaryAmount"].to_s.include?("<positive>") ? "incoming_payment" : "outgoing_payment"
       else "other"
@@ -523,6 +521,106 @@ class WiseItem::LedgerReconstructor
         ).compact
         leg
       end
+    end
+
+    # --- jar moves -------------------------------------------------------------------
+
+    # A same-currency move between a STANDARD balance and a jar. Wise's only
+    # statement of direction is the destination it names ("To EUR",
+    # "To Holiday"); amounts carry no sign. The direction counts as
+    # established only when that destination is corroborated by the balances
+    # Wise lists: the currency of an existing STANDARD balance (money left a
+    # jar) or the name of a known jar (money went into it). Anything else is
+    # held for review instead of being guessed.
+    def jar_move_legs(activity)
+      amount = Text.parse_amount(activity["primaryAmount"])
+      at = time(activity["createdOn"])
+      destination = Text.strip_tags(activity["title"]).delete_prefix("To ").strip
+      currency = amount.currency
+      standard, standard_provenance, standard_basis = infer_balance(currency, at)
+
+      direction =
+        if currency.present? && destination == currency && standard
+          :to_standard
+        elsif (jar = registry.jar_named(destination, currency)) && jar.existed_at?(at)
+          :to_jar
+        end
+
+      common = {
+        category: "jar_move",
+        original_amount: amount.magnitude,
+        original_currency: currency,
+        details: { "destination_title" => destination }
+      }
+
+      if direction.nil? || amount.value.nil?
+        reason = amount.value.nil? ? "unparseable_amount" : "jar_move_direction_not_established"
+        return [ base_leg(activity, **common, direction: nil, provenance: UNRESOLVED, reason: reason) ]
+      end
+
+      jar ||= single_jar(currency, at)
+      jar_basis = direction == :to_jar ? "jar_name_in_title" : (jar ? "single_jar_of_currency" : "jar_not_identifiable")
+      sides = [
+        [ "standard", direction == :to_standard ? "inflow" : "outflow", standard, standard_provenance, standard_basis ],
+        [ "jar", direction == :to_jar ? "inflow" : "outflow", jar, jar ? INFERRED : nil, jar_basis ]
+      ]
+
+      sides.filter_map do |side, leg_direction, account, balance_provenance, basis|
+        next if account.nil? && side == "jar"
+
+        balance_field = leg_direction == "inflow" ? "destination_balance" : "source_balance"
+        base_leg(
+          activity, **common,
+          key: "activity:#{activity['id']}:#{side}",
+          direction: leg_direction,
+          wise_account: account,
+          amount: signed(amount.magnitude, leg_direction),
+          currency: currency,
+          field_provenance: { "amount" => EXPLICIT, "currency" => EXPLICIT, "direction" => INFERRED, balance_field => balance_provenance || UNRESOLVED },
+          provenance: combine(EXPLICIT, balance_provenance),
+          reason: "jar_move_#{direction}_#{basis}",
+          details: common[:details].merge(
+            "jar_move_side" => side,
+            "counterpart_key" => ("activity:#{activity['id']}:#{side == 'standard' ? 'jar' : 'standard'}" if jar),
+            "legacy_external_id" => "wise_interbalance_#{activity.dig('resource', 'id')}_#{side == 'jar' ? 'inflow' : 'outflow'}"
+          ).compact
+        )
+      end
+    end
+
+    def single_jar(currency, at)
+      jars = registry.jars(currency).select { |jar| jar.existed_at?(at) }
+      jars.one? ? jars.first : nil
+    end
+
+    # --- balance interest and fees ---------------------------------------------------
+
+    # Interest ("Cashback") and holding/asset fees name no balance. The
+    # balance is inferred only when exactly one balance of that currency,
+    # STANDARD or jar, existed at the time.
+    def balance_charge_leg(activity)
+      amount = Text.parse_amount(activity["primaryAmount"])
+      at = time(activity["createdOn"])
+      category = BALANCE_CHARGE_TYPES[activity["type"]]
+      direction = category == "interest" ? "inflow" : "outflow"
+      candidates = (registry.eligible(amount.currency, at) + registry.jars(amount.currency).select { |jar| jar.existed_at?(at) }).uniq
+      account = candidates.one? ? candidates.first : nil
+      basis = account ? "single_balance_of_currency" : (candidates.empty? ? "no_eligible_balance" : "multiple_eligible_balances")
+      balance_field = direction == "inflow" ? "destination_balance" : "source_balance"
+
+      base_leg(
+        activity,
+        category: category,
+        direction: direction,
+        wise_account: account,
+        amount: signed(amount.magnitude, direction),
+        currency: amount.currency,
+        original_amount: amount.magnitude,
+        original_currency: amount.currency,
+        field_provenance: { "amount" => amount.value ? EXPLICIT : UNRESOLVED, balance_field => account ? INFERRED : UNRESOLVED },
+        provenance: combine(amount.value ? EXPLICIT : nil, account ? INFERRED : nil),
+        reason: amount.value ? basis : "unparseable_amount"
+      )
     end
 
     # --- batch payments -----------------------------------------------------------

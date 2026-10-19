@@ -11,6 +11,7 @@ en:
       batch_payment: "Batch payment: %{name}"
       cash_withdrawal: Cash withdrawal
       conversion: Converted %{from} to %{to}
+      jar_move: Moved to %{destination}
     activities:
       jar_deposit: Transfer to Jar
       jar_withdrawal: Transfer from Jar

@@ -221,11 +221,55 @@ class WiseItem::LedgerReconstructorTest < ActiveSupport::TestCase
     assert_equal "activity:conv-1:target", source.details["counterpart_key"]
   end
 
-  test "same-currency jar moves are left to the jar sync" do
-    activity = { "id" => "jar-1", "type" => "INTERBALANCE", "status" => "COMPLETED", "title" => "<strong>Holiday jar</strong>",
-                 "primaryAmount" => "200 EUR", "createdOn" => "2024-05-01T10:00:00Z" }
+  test "a move into the main balance is a funds inflow even when the jar is unknown" do
+    legs = reconstruct([ jar_move("jm-1", "To <strong>EUR</strong>") ])
 
-    assert_empty reconstruct([ activity ])
+    assert_equal 1, legs.size, "the unknown jar's leg is never invented"
+    leg = legs.first
+    assert_equal [ "jar_move", "inflow", BigDecimal("-200"), @eur ], [ leg.category, leg.direction, leg.amount, leg.wise_account ]
+    assert_equal "inferred", leg.provenance
+    assert_equal "wise_interbalance_4001_outflow", leg.details["legacy_external_id"]
+  end
+
+  test "a move into a known jar gives both legs" do
+    jar = @wise_item.wise_accounts.create!(balance_id: "50005", currency: "EUR", name: "Holiday", raw_payload: { "type" => "SAVINGS" }, opened_at: Time.utc(2023, 1, 1))
+
+    standard, jar_leg = reconstruct([ jar_move("jm-2", "To <strong>Holiday</strong>") ])
+
+    assert_equal [ "outflow", @eur, BigDecimal("200") ], [ standard.direction, standard.wise_account, standard.amount ]
+    assert_equal [ "inflow", jar, BigDecimal("-200") ], [ jar_leg.direction, jar_leg.wise_account, jar_leg.amount ]
+    assert_equal "activity:jm-2:jar", standard.details["counterpart_key"]
+  end
+
+  test "a jar move whose destination cannot be corroborated is held for review" do
+    leg = only_leg(jar_move("jm-3", "To <strong>Old jar</strong>"))
+
+    assert_equal "unresolved", leg.provenance
+    assert_equal "jar_move_direction_not_established", leg.reason
+    assert_nil leg.amount
+  end
+
+  test "interest goes to the only balance of its currency" do
+    leg = only_leg({ "id" => "cb-1", "type" => "BALANCE_CASHBACK", "status" => "COMPLETED", "title" => "<strong>Cashback</strong>",
+                     "resource" => { "type" => "BALANCE_CASHBACK", "id" => "9" }, "primaryAmount" => "<positive>+ 1.12 EUR</positive>",
+                     "createdOn" => "2024-05-01T10:00:00Z" })
+
+    assert_equal [ "interest", BigDecimal("-1.12"), @eur, "inferred" ], [ leg.category, leg.amount, leg.wise_account, leg.provenance ]
+    assert_equal "activity:cb-1", leg.key, "same external id the jar sync used, so existing entries are kept"
+  end
+
+  test "a holding fee is an outflow and unresolved when several balances could be charged" do
+    @wise_item.wise_accounts.create!(balance_id: "50005", currency: "EUR", name: "Holiday", raw_payload: { "type" => "SAVINGS" })
+    leg = only_leg({ "id" => "hf-1", "type" => "BALANCE_HOLD_FEE", "status" => "COMPLETED", "title" => "<strong>Holding fee</strong>",
+                     "resource" => { "type" => "ACCRUAL_CHARGE", "id" => "8" }, "primaryAmount" => "2.50 EUR", "createdOn" => "2024-05-01T10:00:00Z" })
+
+    assert_equal [ "balance_fee", "outflow", "unresolved", "multiple_eligible_balances" ], [ leg.category, leg.direction, leg.provenance, leg.reason ]
+  end
+
+  test "the same activity seen twice yields one leg" do
+    activity = card("2001", "<strong>Lidl</strong>", "23.45 EUR")
+
+    assert_equal 1, reconstruct([ activity, activity.dup ]).size
   end
 
   # --- batches ------------------------------------------------------------------------
@@ -312,6 +356,12 @@ class WiseItem::LedgerReconstructorTest < ActiveSupport::TestCase
       { "id" => "card-#{id}", "type" => type, "resource" => { "type" => "CARD_TRANSACTION", "id" => id },
         "title" => title, "description" => description, "primaryAmount" => primary, "secondaryAmount" => secondary,
         "status" => status, "createdOn" => at }
+    end
+
+    def jar_move(id, title)
+      { "id" => id, "type" => "INTERBALANCE", "status" => "COMPLETED", "description" => "Moved",
+        "resource" => { "type" => "BALANCE_TRANSACTION", "id" => "4001" }, "title" => title,
+        "primaryAmount" => "200 EUR", "secondaryAmount" => "", "createdOn" => "2024-05-01T10:00:00Z" }
     end
 
     def transfer_activity(id, title, primary, secondary: "", type: "TRANSFER")

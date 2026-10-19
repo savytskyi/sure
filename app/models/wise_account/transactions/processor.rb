@@ -63,20 +63,13 @@ class WiseAccount::Transactions::Processor
 
   private
 
-    # Rows the reconstructed Wise ledger (WiseItem::LedgerProcessor) now owns.
-    # Their entries already exist and are claimed by the new legs, so
-    # re-importing them here would recreate them under their old ids:
-    # - transfer rows from the old /v1/transfers fallback, which routed
-    #   movements by currency alone;
-    # - currency conversions, which the old jar routing booked as an outflow
-    #   on every STANDARD balance;
-    # - same-currency jar moves of another currency than this balance's.
+    # Rows the reconstructed Wise ledger (WiseItem::LedgerProcessor) now owns:
+    # transfer rows from the old /v1/transfers fallback and every activity row
+    # (jar moves, jar interest and fees, conversions). Their entries already
+    # exist and are adopted, under their existing ids, by the reconstructed
+    # legs; processing these rows as well would write the same entries from
+    # two sources with different rules. Only statement rows are processed.
     def superseded_payload_row?(tx_data)
-      return false if tx_data["wise_statement"].present?
-      return true if tx_data["type"].blank?
-      return false unless tx_data["type"] == "INTERBALANCE"
-      return true if WiseItem::LedgerReconstructor.conversion?(tx_data)
-
-      !wise_account.jar? && WiseActivity::Text.parse_amount(tx_data["primaryAmount"]).currency.then { |currency| currency.present? && currency != wise_account.currency }
+      tx_data["wise_statement"].blank?
     end
 end
