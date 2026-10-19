@@ -64,7 +64,7 @@ class DerivativeLedgerEvent::EntryWriterTest < ActiveSupport::TestCase
     write
     entry = @account.entries.sole
 
-    assert_equal({ unchanged: 1 }, write.to_h.symbolize_keys)
+    assert_empty write, "a day without new events is not touched"
 
     event("funding", "-0.08", asset: "USDT", market: "usds_m", symbol: "ETHUSDT", at: 20)
     assert_equal({ updated: 1 }, write.to_h.symbolize_keys)

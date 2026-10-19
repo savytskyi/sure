@@ -17,8 +17,8 @@
 # (and Balance::BaseCalculator would count it), while the quantity lets
 # Holding::ReverseCalculator walk the position back through history.
 #
-# Idempotent: a day is recomputed from all of its events on every run and the
-# entry is updated in place. An entry the user edited keeps their edits; one
+# Idempotent: a day with a new event is recomputed from all of its events and
+# the entry is updated in place; days without one are not touched. An entry the user edited keeps their edits; one
 # the user deleted is never recreated, even when more events for that day
 # arrive later.
 class DerivativeLedgerEvent::EntryWriter
@@ -78,6 +78,10 @@ class DerivativeLedgerEvent::EntryWriter
         counts[:dismissed] += 1
         next
       end
+
+      # Only a new event (or a deleted entry) can change a day; the rest of
+      # the history is left alone instead of being re-read every sync.
+      next unless group.any? { |event| event.ready? || event.deleted_by_user? }
 
       counts[write_day(*key, group)] += 1
     end
