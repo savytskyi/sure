@@ -26,6 +26,14 @@ class BinanceAccount::FuturesIncomeImporter
     "coin_m" => { source: "coin_futures", request: :get_coin_futures_income, lookback: 365.days, host: "dapi.binance.com" }
   }.freeze
 
+  # Windows older than this may be refused outright where Binance does not
+  # state its retention. Such a refusal is skipped (and recorded) rather than
+  # retried forever from the same checkpoint.
+  DOCUMENTED_RETENTION = 90.days
+
+  # Waited out when Binance asked for a pause without saying how long.
+  DEFAULT_RATE_LIMIT_PAUSE = 60.seconds
+
   PAGE_LIMIT = 1000
   WINDOW = 30.days
   OVERLAP = 1.day
@@ -87,6 +95,12 @@ class BinanceAccount::FuturesIncomeImporter
     def import_market(market, now)
       config = MARKETS.fetch(market)
       checkpoint = checkpoints[market] || {}
+
+      # A 429 or 418 asked for a pause. Asking again sooner extends an IP ban.
+      if (paused_until = rate_limit_pause_until(checkpoint)) && now < paused_until
+        return { created: 0, requests: 0, complete: false, stopped: "waiting_for_rate_limit" }
+      end
+
       now_ms = (now.to_f * 1000).to_i
       floor_ms = ((now - config[:lookback]).to_f * 1000).to_i
 
@@ -119,8 +133,16 @@ class BinanceAccount::FuturesIncomeImporter
         end
 
         window_start, window_end = windows.shift
-        rows = Array(provider.public_send(config[:request], start_time: window_start, end_time: window_end, limit: PAGE_LIMIT))
         stats[:requests] += 1
+        begin
+          rows = Array(provider.public_send(config[:request], start_time: window_start, end_time: window_end, limit: PAGE_LIMIT))
+        rescue Provider::Binance::ApiError => e
+          raise unless window_end < now_ms - DOCUMENTED_RETENTION.in_milliseconds
+
+          skipped = (checkpoint["unavailable_windows"] || []) + [ [ window_start, window_end, e.message.truncate(120) ] ]
+          checkpoint = checkpoint.merge("unavailable_windows" => skipped.last(20))
+          rows = []
+        end
 
         if rows.size >= PAGE_LIMIT && window_end > window_start
           middle = window_start + (window_end - window_start) / 2
@@ -130,23 +152,34 @@ class BinanceAccount::FuturesIncomeImporter
 
         stats[:created] += store(market, rows)
         covered_to = [ covered_to || 0, window_end ].max
-        save_checkpoint(market, covered_to_ms: covered_to, started_from_ms: checkpoint["started_from_ms"] || start_ms)
+        save_checkpoint(market, covered_to_ms: covered_to, started_from_ms: checkpoint["started_from_ms"] || start_ms,
+                        unavailable_windows: checkpoint["unavailable_windows"])
       end
 
       stats[:complete] = windows.empty?
       save_checkpoint(market, covered_to_ms: covered_to, started_from_ms: checkpoint["started_from_ms"] || start_ms,
                       backfill_complete: checkpoint["backfill_complete"] || stats[:complete], stopped: stats[:stopped],
-                      error: nil, retry_after: nil)
+                      error: nil, error_class: nil, retry_after: nil)
       record_stop(market, stats) if stats[:stopped]
       stats
-    rescue Provider::Binance::RateLimitError, Provider::Binance::AuthenticationError, Provider::Binance::ApiError => e
+    # Any failure (Binance, timeout, connection) stops this market only: the
+    # other market and the ledger writer still run, and the checkpoint keeps
+    # everything read before it.
+    rescue StandardError => e
       stats ||= { created: 0, requests: 0, complete: false }
       stats[:stopped] = e.class.name.demodulize.underscore
       stats[:error] = e.message
+      retry_after = e.is_a?(Provider::Binance::RateLimitError) ? (e.retry_after || DEFAULT_RATE_LIMIT_PAUSE.to_i) : nil
       save_checkpoint(market, covered_to_ms: covered_to, started_from_ms: checkpoint["started_from_ms"] || start_ms,
-                      stopped: stats[:stopped], error: e.message, retry_after: e.try(:retry_after))
+                      stopped: stats[:stopped], error: e.message, error_class: e.class.name, retry_after: retry_after)
       record_stop(market, stats)
       stats
+    end
+
+    def rate_limit_pause_until(checkpoint)
+      return nil unless checkpoint["retry_after"].present? && checkpoint["run_at"].present?
+
+      Time.zone.parse(checkpoint["run_at"]) + checkpoint["retry_after"].to_i.seconds
     end
 
     def store(market, rows)

@@ -130,6 +130,9 @@ the income statement and contribution figures see zero cash, so nothing is
 reported as cash income. Days are recomputed in place on every sync; an
 entry the user edited keeps their edits, a deleted day is never recreated
 (also when more events for it arrive), a day that nets to zero has no entry.
+Only days with a new event are touched, plus days saved without a price:
+the price is the cost basis of the coins received, so those are re-priced
+as soon as a price is found.
 
 ### Identity and idempotency
 
@@ -157,6 +160,14 @@ Per market, in `binance_accounts.extra["binance"]["futures_income"]`:
   passes 1800 (of 2400), on 429/418 (keeping `Retry-After`), on a permission
   error or any API error; a `DebugLogEntry` records it and the next sync
   resumes from the checkpoint. Spot history is never blocked by futures.
+* After a 429/418 the market is not asked again until `Retry-After` (60 s
+  when Binance gives none) has passed, so an IP ban is not extended.
+* Any failure in one market (Binance error, timeout, reset connection) stops
+  only that market; the other market and the ledger writer still run.
+* A window older than 90 days that Binance refuses (COIN-M retention is not
+  documented) is skipped and listed in `unavailable_windows` instead of
+  pinning the backfill to it forever; a refusal of a recent window stops the
+  read and is retried next sync.
 * A market is only asked for income when its wallet answered in the same
   sync.
 

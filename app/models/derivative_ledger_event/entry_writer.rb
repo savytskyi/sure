@@ -69,6 +69,7 @@ class DerivativeLedgerEvent::EntryWriter
   def write(events = DerivativeLedgerEvent.where(account: account).importable)
     counts = Hash.new(0)
     dismissed_days = DerivativeLedgerEvent.where(account: account).dismissed.map { |event| group_key(event) }.to_set
+    unpriced = unpriced_entry_ids
 
     events.order(:occurred_at).to_a.group_by { |event| group_key(event) }.each do |key, group|
       # An event arriving for a day the user already deleted joins that
@@ -79,9 +80,11 @@ class DerivativeLedgerEvent::EntryWriter
         next
       end
 
-      # Only a new event (or a deleted entry) can change a day; the rest of
-      # the history is left alone instead of being re-read every sync.
-      next unless group.any? { |event| event.ready? || event.deleted_by_user? }
+      # Only a new event, a deleted entry or a price still missing can change
+      # a day; the rest of the history is left alone instead of being re-read
+      # every sync. The price matters despite the zero amount: it is the cost
+      # basis of the coins received.
+      next unless group.any? { |event| event.ready? || event.deleted_by_user? || unpriced.include?(event.entry_id) }
 
       counts[write_day(*key, group)] += 1
     end
@@ -142,6 +145,13 @@ class DerivativeLedgerEvent::EntryWriter
       end
 
       outcome
+    end
+
+    def unpriced_entry_ids
+      account.entries.where(source: source, entryable_type: "Trade")
+             .joins("INNER JOIN trades ON trades.id = entries.entryable_id")
+             .where("trades.extra -> ? ->> 'price_missing' = 'true'", source)
+             .pluck(:id).to_set
     end
 
     def dismiss!(events)

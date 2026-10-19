@@ -125,6 +125,20 @@ class DerivativeLedgerEvent::EntryWriterTest < ActiveSupport::TestCase
     assert trade.extra.dig("binance", "price_missing")
   end
 
+  # The price is the cost basis of the coins received, so a day saved
+  # without one is priced as soon as a price can be found.
+  test "a day saved without a price is priced on a later run" do
+    event("funding", "0.0001")
+    write(price_for: ->(*) { nil })
+
+    assert_equal({ updated: 1 }, write.to_h.symbolize_keys)
+
+    trade = @account.entries.sole.entryable.reload
+    assert_equal BigDecimal("55000"), trade.price
+    assert_nil trade.extra.dig("binance", "price_missing")
+    assert_empty write, "once priced, the day is left alone"
+  end
+
   # The point of writing quantities: Sure's reverse holdings walk undoes
   # them, so the margin coin's history reflects what futures did to it, and
   # no cash appears on any day.

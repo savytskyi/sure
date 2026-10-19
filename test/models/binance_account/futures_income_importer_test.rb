@@ -158,6 +158,65 @@ class BinanceAccount::FuturesIncomeImporterTest < ActiveSupport::TestCase
     assert_nil checkpoint("usds_m")["error"], "a later clean run clears the error"
   end
 
+  test "a rate limit pause is waited out before Binance is asked again" do
+    limited = FakeProvider.new { raise Provider::Binance::RateLimitError.new("banned", retry_after: 120) }
+    import(limited)
+
+    soon = FakeProvider.new { [] }
+    stats = import(soon, now: Time.current + 30.seconds)
+    assert_empty soon.calls, "asked again within Retry-After"
+    assert_equal "waiting_for_rate_limit", stats["usds_m"][:stopped]
+
+    later = FakeProvider.new { [] }
+    import(later, now: Time.current + 3.minutes)
+    assert later.calls.any?
+    assert_nil checkpoint("usds_m")["retry_after"]
+  end
+
+  test "a timeout in one market leaves the other market's read intact" do
+    provider = FakeProvider.new do |market, *|
+      raise Net::ReadTimeout if market == :usds_m
+
+      rows("cm_income")
+    end
+
+    stats = import(provider)
+
+    assert_equal "read_timeout", stats["usds_m"][:stopped]
+    assert_equal "Net::ReadTimeout", checkpoint("usds_m")["error_class"]
+    assert_equal 7, DerivativeLedgerEvent.where(market: "coin_m").count
+  end
+
+  # Binance does not state COIN-M retention. A refusal for a window older
+  # than the documented 90 days must not pin the backfill to that window.
+  test "an old window Binance refuses is skipped and recorded instead of stalling the backfill" do
+    @item.update!(sync_start_date: @now - 365.days)
+    @ba.update!(raw_payload: { "coin_futures" => { "assets" => [] } })
+    refuse_before = ms(@now - 200.days)
+    provider = FakeProvider.new do |_market, start_time, _end|
+      raise Provider::Binance::ApiError, "startTime is invalid" if start_time < refuse_before
+
+      []
+    end
+
+    stats = import(provider)
+
+    assert stats["coin_m"][:complete]
+    assert_equal ms(@now), checkpoint("coin_m")["covered_to_ms"]
+    assert checkpoint("coin_m")["unavailable_windows"].size.positive?
+    assert_match "startTime is invalid", checkpoint("coin_m")["unavailable_windows"].first.last
+  end
+
+  test "a recent window Binance refuses stops the read rather than being skipped" do
+    provider = FakeProvider.new { raise Provider::Binance::ApiError, "server busy" }
+
+    stats = import(provider)
+
+    assert_equal "api_error", stats["usds_m"][:stopped]
+    refute checkpoint("usds_m")["backfill_complete"]
+    assert_nil checkpoint("usds_m")["covered_to_ms"]
+  end
+
   test "the request budget pauses a long backfill" do
     @item.update!(sync_start_date: @now - 365.days)
     @ba.update!(raw_payload: { "coin_futures" => { "assets" => [] } })
