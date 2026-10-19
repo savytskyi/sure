@@ -18,6 +18,11 @@ class WiseItem::LedgerCollector
   SOURCE = "wise"
 
   Result = Data.define(:complete, :legs, :errors)
+  # Detail keys owned by import and operator decisions, not re-derived from Wise.
+  PRESERVED_DETAILS = %w[
+    merchant_id import_digest duplicate_candidate_entry_ids imported_provider_account_id
+    moved_from_account_id resolution classification
+  ].freeze
 
   attr_reader :wise_item, :wise_provider
 
@@ -109,16 +114,20 @@ class WiseItem::LedgerCollector
     end
 
     # Quotes and recipients of a funded transfer never change, so each is
-    # fetched once. A 404 is remembered; a refusal stops further detail
-    # requests for this sync and leaves fees and funding balances unknown.
+    # fetched once and cached on its transfer order; a 404 is remembered. A
+    # refusal, a rate limit or the per-sync request budget stops further
+    # detail requests: the sync reports itself incomplete (the checkpoint
+    # holds) and the next one continues where this one stopped. Legs whose
+    # quote is still missing stay unresolved until then.
     def collect_transfer_details
       complete = true
-      window_transfer_orders.each do |record|
+      @detail_budget = Rails.configuration.x.wise.detail_requests_per_sync
+      window_transfer_orders.order(:occurred_at).each do |record|
         payload = record.raw_payload || {}
         transfer = payload["transfer"] || {}
         changed = false
 
-        if payload["quote"].nil? && record.details["quote_state"].nil? && transfer["quoteUuid"].present? && !@quotes_unavailable
+        if payload["quote"].nil? && record.details["quote_state"].nil? && transfer["quoteUuid"].present? && !@quotes_unavailable && !detail_fetching_stopped?
           state, quote = fetch_detail(:quote) { wise_provider.get_quote(wise_item.profile_id, transfer["quoteUuid"]) }
           @quotes_unavailable = true if state == "unavailable"
           complete &&= state != "failed"
@@ -128,10 +137,13 @@ class WiseItem::LedgerCollector
         end
 
         target = transfer["targetAccount"].presence&.to_s
-        if target && payload["recipient"].nil? && record.details["recipient_state"].nil? && !@recipients_unavailable
-          state, recipient = cached_recipient(target) || fetch_detail(:recipient) { wise_provider.get_recipient_account(target) }
-          @recipient_cache[target] = [ state, recipient ] if state.in?(%w[ok not_found])
-          @recipients_unavailable = true if state == "unavailable"
+        if target && payload["recipient"].nil? && record.details["recipient_state"].nil? &&
+           (cached = cached_recipient(target) || (detail_fetching_stopped? ? nil : :fetch))
+          state, recipient = cached == :fetch ? fetch_detail(:recipient) { wise_provider.get_recipient_account(target) } : cached
+          # One recipient Wise refuses to show (another user's account) must
+          # not stop the others; it is remembered like a 404.
+          state = "forbidden" if state == "unavailable"
+          @recipient_cache[target] = [ state, recipient ] if state.in?(%w[ok not_found forbidden])
           complete &&= state != "failed"
           payload = payload.merge("recipient" => recipient) if recipient
           record.details = record.details.merge("recipient_state" => state) unless state.in?(%w[failed unavailable])
@@ -144,8 +156,22 @@ class WiseItem::LedgerCollector
         end
       end
 
-      checkpoint_details_state(@quotes_unavailable || @recipients_unavailable ? "unavailable" : "ok")
+      complete &&= !detail_fetching_stopped? || pending_details.none?
+      checkpoint_details_state(@quotes_unavailable ? "unavailable" : "ok")
       complete
+    end
+
+    def detail_fetching_stopped?
+      @rate_limited || @detail_budget <= 0
+    end
+
+    # Transfer orders in the window still waiting for a quote or recipient.
+    def pending_details
+      window_transfer_orders.select do |record|
+        transfer = record.raw_payload&.dig("transfer") || {}
+        (transfer["quoteUuid"].present? && record.raw_payload&.dig("quote").nil? && record.details["quote_state"].nil? && !@quotes_unavailable) ||
+          (transfer["targetAccount"].present? && record.raw_payload&.dig("recipient").nil? && record.details["recipient_state"].nil?)
+      end
     end
 
     def window_transfer_orders
@@ -153,10 +179,15 @@ class WiseItem::LedgerCollector
     end
 
     def fetch_detail(kind)
+      @detail_budget -= 1
       [ "ok", with_rate_limit_retry { yield } ]
     rescue Provider::Wise::WiseError => e
       case e.error_type
       when :not_found then [ "not_found", nil ]
+      when :rate_limited
+        @rate_limited = true
+        @errors << { operation: kind.to_s, error_type: e.error_type }
+        [ "failed", nil ]
       when :access_forbidden, :unauthorized
         @errors << { operation: kind.to_s, error_type: e.error_type }
         [ "unavailable", nil ]
@@ -263,11 +294,12 @@ class WiseItem::LedgerCollector
         counterparty_name: leg.counterparty_name,
         merchant_name: leg.merchant_name,
         payment_reference: leg.payment_reference,
-        details: record.details.slice("merchant_id", "import_digest", "duplicate_candidate_entry_ids")
+        details: record.details.slice(*PRESERVED_DETAILS)
           .merge(leg.details || {})
           .merge("statement_reference" => leg.statement_reference).compact,
         raw_payload: leg.raw
       )
+      WiseItem::LedgerResolution.apply(record)
       apply_status(record, leg)
       record.save!
     end
@@ -283,17 +315,16 @@ class WiseItem::LedgerCollector
           record.reason = leg.excluded_reason
         end
       elsif statement_covered?(record)
-        if record.imported?
-          ledger_importer(record).supersede!("wise_statement_#{record.details['statement_reference']}")
-        else
-          record.status = :superseded
-          record.reason = "covered_by_statement"
-        end
-      elsif !record.importable_provenance? || record.provider_account.nil?
+        record.status = :superseded
+        record.reason = "covered_by_statement"
+      elsif !record.importable_provenance? || record.provider_account.nil? || record.amount.nil?
+        # A leg imported earlier keeps its entry; review decides what it is now.
+        record.reason = "previously_imported_now_#{record.reason}" if record.imported? && !record.reason.to_s.start_with?("previously_imported")
         record.status = :needs_review
-      elsif !record.imported?
-        # Possible duplicates are re-checked on every sync.
-        record.status = :ready
+      elsif !record.imported? || record.needs_review?
+        # Possible duplicates are re-checked on every sync; a leg that was
+        # imported and became unresolved returns to the ledger once resolved.
+        record.status = record.entry_id.present? ? :imported : :ready
       end
     end
 

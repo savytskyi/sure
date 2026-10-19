@@ -51,10 +51,8 @@ class WiseItem::Importer
     statements = fetch_statements
     activity_window = activity_window_range
     activities = fetch_activities(activity_window)
-    jar_activities = Array(activities).select { |activity| WiseItem::LedgerReconstructor.jar_activity?(activity) }
 
     transaction_result = store_transactions_per_account(
-      activities: jar_activities,
       statements: statements,
       statement_failures: Array(@statement_fetch_failed_accounts)
     )
@@ -197,7 +195,7 @@ class WiseItem::Importer
 
         existing = Array(wise_account.raw_transactions_payload)
         legacy = existing.select do |transaction|
-          transaction["wise_statement"].blank? && !jar_activity?(transaction)
+          transaction["wise_statement"].blank? && transaction["type"].blank?
         end
         legacy_cutoff = legacy.filter_map { |transaction| parse_transaction_date(transaction) }.min
 
@@ -316,6 +314,15 @@ class WiseItem::Importer
         start = [ desired, covered_to - overlap_days.days ].max
       end
 
+      # Wise changes old activities: a refunded transfer turns CANCELLED, a
+      # card payment is reversed. Periodically the whole refresh horizon is
+      # re-read so those changes reach the ledger.
+      refreshed_at = parse_time(checkpoint["refreshed_at"])
+      @refresh_due = covered_to.present? && (refreshed_at.nil? || refreshed_at < refresh_interval_days.days.ago)
+      # A first backfill reads everything, which counts as a refresh.
+      @initial_window = covered_to.nil?
+      start = [ start, [ desired, refresh_days.days.ago ].max ].min if @refresh_due
+
       pending_floor = wise_item.ledger_records
         .where(status: :excluded, reason: "pending")
         .where(occurred_at: PENDING_REFRESH_DAYS.days.ago..)
@@ -399,15 +406,18 @@ class WiseItem::Importer
         wise_provider: wise_provider,
         window_start: window.begin,
         window_end: window.end
-      ).collect(Array(activities).reject { |activity| WiseItem::LedgerReconstructor.jar_activity?(activity) })
+      ).collect(Array(activities))
 
       complete = @activities_complete && result.complete
       if complete
         previous_from = parse_time(wise_item.checkpoint("activities")["covered_from"])
-        wise_item.update_checkpoint!("activities",
+        attributes = {
           "covered_from" => [ previous_from, window.begin ].compact.min.utc.iso8601,
           "covered_to" => window.end.utc.iso8601,
-          "state" => "ok")
+          "state" => "ok"
+        }
+        attributes["refreshed_at"] = window.end.utc.iso8601 if @refresh_due || @initial_window
+        wise_item.update_checkpoint!("activities", attributes)
       else
         result.errors.each do |error|
           trace_wise_fetch(operation: error[:operation], status: "failed", level: "warn",
@@ -423,11 +433,13 @@ class WiseItem::Importer
 
     # --- stored payloads ------------------------------------------------------------
 
-    # Stores statement rows for STANDARD balances and jar activities for jars.
-    # Legacy transfer rows from the old /v1/transfers fallback are kept as
-    # they were but no longer processed (see WiseAccount::Transactions::Processor);
-    # reconstructed legs claim their entries instead.
-    def store_transactions_per_account(activities: [], statements: {}, statement_failures: [])
+    # Stores statement rows for STANDARD balances. Every activity, including
+    # jar moves and jar interest, now goes through the reconstructed ledger.
+    # Rows earlier versions stored (legacy transfers, jar activities) stay in
+    # the payload untouched but are no longer processed (see
+    # WiseAccount::Transactions::Processor); the reconstructed legs adopt
+    # their entries under their existing ids.
+    def store_transactions_per_account(statements: {}, statement_failures: [])
       transactions_imported = 0
       transactions_failed = 0
 
@@ -437,18 +449,12 @@ class WiseItem::Importer
           next
         end
 
-        if wise_account.jar?
-          jar_activities = activities.select { |a| activity_for_account?(a, wise_account) }
-          wise_account.upsert_wise_transactions_snapshot!(merge_transaction_payloads(Array(wise_account.raw_transactions_payload) + jar_activities))
-          transactions_imported += jar_activities.size
-        else
-          existing = Array(wise_account.raw_transactions_payload)
-          account_statements = statements[wise_account.id] || []
-          interbalance = activities.select { |a| activity_for_account?(a, wise_account) }
-          payload = merge_transaction_payloads(existing + account_statements + interbalance)
-          wise_account.upsert_wise_transactions_snapshot!(payload)
-          transactions_imported += account_statements.size + interbalance.size
-        end
+        account_statements = statements[wise_account.id] || []
+        next if account_statements.empty?
+
+        payload = merge_transaction_payloads(Array(wise_account.raw_transactions_payload) + account_statements)
+        wise_account.upsert_wise_transactions_snapshot!(payload)
+        transactions_imported += account_statements.size
       rescue => e
         transactions_failed += 1
         Rails.logger.error "WiseItem::Importer - Failed to store transactions for wise_account #{wise_account.id}: #{e.message}"
@@ -468,40 +474,6 @@ class WiseItem::Importer
         end
         merged[key] = transaction
       end.values
-    end
-
-    def jar_activity?(transaction)
-      WiseActivity::Processor::JAR_ACTIVITY_TYPES.include?(transaction["type"])
-    end
-
-    # Routes a jar activity to the given WiseAccount.
-    # JAR: receives INTERBALANCE where the activity title's <strong> tag matches the JAR name,
-    #      plus BALANCE_CASHBACK and BALANCE_ASSET_FEE when it is the only jar in that currency.
-    # STANDARD: receives same-currency INTERBALANCE moves of its own currency only, and only
-    #      while it is the single STANDARD balance of that currency (the other side of the jar move).
-    def activity_for_account?(activity, wise_account)
-      currency = WiseActivity::Text.parse_amount(activity["primaryAmount"]).currency
-
-      case activity["type"]
-      when "INTERBALANCE"
-        if wise_account.jar?
-          jar_name_in_title = activity["title"].to_s.scan(/<strong>([^<]+)<\/strong>/).flatten.last.to_s.strip
-          jar_name_in_title.present? && jar_name_in_title.casecmp?(wise_account.name.to_s.strip)
-        else
-          time = parse_time(activity["createdOn"])
-          currency == wise_account.currency && time.present? &&
-            WiseItem::BalanceRegistry.new(registry_accounts).infer(currency, time).first == wise_account
-        end
-      when "BALANCE_ASSET_FEE", "BALANCE_CASHBACK"
-        wise_account.jar? && (currency.nil? || currency == wise_account.currency) &&
-          WiseItem::BalanceRegistry.new(registry_accounts).jars(wise_account.currency).one?
-      else
-        false
-      end
-    end
-
-    def registry_accounts
-      @registry_accounts ||= wise_item.wise_accounts.to_a
     end
 
     def trace_wise_fetch(operation:, status:, level:, wise_account: nil, error: nil, **metadata)
@@ -549,6 +521,14 @@ class WiseItem::Importer
 
     def overlap_days
       Rails.configuration.x.wise.overlap_days
+    end
+
+    def refresh_days
+      Rails.configuration.x.wise.refresh_days
+    end
+
+    def refresh_interval_days
+      Rails.configuration.x.wise.refresh_interval_days
     end
 
     def sync_start_date_value

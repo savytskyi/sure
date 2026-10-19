@@ -379,47 +379,20 @@ class WiseItem::ImporterTest < ActiveSupport::TestCase
 
   # Activity routing
 
-  test "routes INTERBALANCE activities to both JAR and STANDARD accounts" do
+  test "jar moves and jar interest are reconstructed, not routed by title" do
     savings = {
-      "id" => "10000002",
+      "id" => "10000002", "type" => "SAVINGS", "name" => "Jar",
       "amount" => { "value" => 1000.0, "currency" => "EUR" },
-      "totalWorth" => { "value" => 1000.0, "currency" => "EUR" },
-      "reservedAmount" => { "value" => 0.0, "currency" => "EUR" },
-      "type" => "SAVINGS",
-      "name" => "Jar"
+      "totalWorth" => { "value" => 1000.0, "currency" => "EUR" }
     }
-    interbalance = build_interbalance("To <strong>Jar</strong>", resource_id: "5001")
-    provider = FakeWiseProvider.new(savings_balances: [ savings ], activities: [ interbalance ])
+    provider = FakeWiseProvider.new(savings_balances: [ savings ], activities: [ build_interbalance("To <strong>Jar</strong>", resource_id: "5001") ])
 
     WiseItem::Importer.new(@wise_item, wise_provider: provider).import
 
-    jar = @wise_item.wise_accounts.find_by(balance_id: "10000002")
-    standard = @wise_item.wise_accounts.find_by(balance_id: "10000001")
-
-    assert_equal 1, jar.raw_transactions_payload.size
-    assert jar.raw_transactions_payload.any? { |a| a["type"] == "INTERBALANCE" }
-    assert standard.raw_transactions_payload.any? { |a| a["type"] == "INTERBALANCE" }
-  end
-
-  test "routes BALANCE_CASHBACK only to JAR account" do
-    savings = {
-      "id" => "10000002",
-      "amount" => { "value" => 1000.0, "currency" => "EUR" },
-      "totalWorth" => { "value" => 1000.0, "currency" => "EUR" },
-      "reservedAmount" => { "value" => 0.0, "currency" => "EUR" },
-      "type" => "SAVINGS",
-      "name" => "Jar"
-    }
-    cashback = build_cashback("57001")
-    provider = FakeWiseProvider.new(savings_balances: [ savings ], activities: [ cashback ])
-
-    WiseItem::Importer.new(@wise_item, wise_provider: provider).import
-
-    jar = @wise_item.wise_accounts.find_by(balance_id: "10000002")
-    standard = @wise_item.wise_accounts.find_by(balance_id: "10000001")
-
-    assert_equal 1, jar.raw_transactions_payload.size
-    assert_empty standard.raw_transactions_payload.select { |a| a["type"] == "BALANCE_CASHBACK" }
+    assert_empty Array(@wise_item.wise_accounts.find_by(balance_id: "10000002").raw_transactions_payload)
+    legs = @wise_item.ledger_records.where(category: "jar_move").index_by { |record| record.provider_account.balance_id }
+    assert_equal BigDecimal("1000"), legs["10000001"].amount, "out of the main balance"
+    assert_equal BigDecimal("-1000"), legs["10000002"].amount, "into the jar"
   end
 
   test "stops activity pagination when Wise repeats a cursor" do
@@ -554,6 +527,105 @@ class WiseItem::ImporterTest < ActiveSupport::TestCase
     assert_equal 0, eur.entries.where(entryable_type: "Transaction").count
   end
 
+  # Lifecycle
+
+  test "a pending card payment is imported once it completes" do
+    eur, = link_standard_balances
+    sync_with(activities: [ card_activity("2001", "<strong>Lidl</strong>", "23.45 EUR", status: "IN_PROGRESS") ])
+    assert_equal 0, eur.entries.where(source: "wise").count
+
+    sync_with(activities: [ card_activity("2001", "<strong>Lidl</strong>", "23.45 EUR") ])
+
+    assert_equal [ BigDecimal("23.45") ], eur.entries.where(source: "wise").pluck(:amount)
+  end
+
+  test "a transfer cancelled months later is found by the refresh window and stops counting" do
+    eur, = link_standard_balances
+    sent = { "id" => "tr-7101", "type" => "TRANSFER", "status" => "COMPLETED", "resource" => { "type" => "TRANSFER", "id" => "7101" },
+             "title" => "<strong>Shop</strong>", "primaryAmount" => "100 EUR", "createdOn" => 60.days.ago.iso8601 }
+    transfer = build_transfer(id: 7101).merge("created" => 60.days.ago.strftime("%Y-%m-%d %H:%M:%S"), "quoteUuid" => "q-1")
+    quotes = { "q-1" => { "payInId" => 10000001, "payInMethod" => "BALANCE", "payOut" => "BANK_TRANSFER",
+                          "paymentOptions" => [ { "payIn" => "BALANCE", "payOut" => "BANK_TRANSFER", "fee" => { "total" => 0 } } ] } }
+    sync_with(activities: [ sent ], transfers: [ transfer ], quotes: quotes)
+    entry = eur.entries.find_by(source: "wise", amount: 100)
+    assert entry
+
+    @wise_item.update_checkpoint!("activities", "refreshed_at" => 30.days.ago.iso8601)
+    provider = sync_with(activities: [ sent.merge("status" => "CANCELLED", "description" => "Cancelled") ], transfers: [ transfer ], quotes: quotes)
+
+    assert_operator provider.activity_requests.first[:since], :<, 100.days.ago
+    assert entry.reload.excluded?
+    assert @wise_item.ledger_records.find_by(external_key: "activity:tr-7101").withdrawn?
+  end
+
+  test "a rate-limited backfill keeps its checkpoint and continues from cached details" do
+    transfers = (1..3).map { |i| build_transfer(id: 7200 + i).merge("quoteUuid" => "q-#{i}", "targetAccount" => nil) }
+    quotes = (1..3).to_h { |i| [ "q-#{i}", { "payInId" => 10000001, "payInMethod" => "BALANCE" } ] }
+    limited = FakeWiseProvider.new(transfers: transfers, quotes: quotes)
+    served = 0
+    limited.define_singleton_method(:get_quote) do |_profile, quote_id|
+      calls << :get_quote
+      served += 1
+      raise Provider::Wise::WiseError.new("slow down", :rate_limited) if served > 1
+
+      quotes.fetch(quote_id)
+    end
+    importer = WiseItem::Importer.new(@wise_item, wise_provider: limited)
+    WiseItem::LedgerCollector.any_instance.stubs(:sleep)
+
+    result = importer.import
+
+    assert_not result[:success]
+    assert_nil @wise_item.reload.checkpoint("activities")["covered_to"]
+    assert_equal 1, @wise_item.ledger_records.where(category: "transfer_order").count { |record| record.raw_payload["quote"] }
+
+    resumed = FakeWiseProvider.new(transfers: transfers, quotes: quotes)
+    assert WiseItem::Importer.new(@wise_item, wise_provider: resumed).import[:success]
+    assert_equal 2, resumed.calls.count(:get_quote), "only the quotes still missing are requested"
+  end
+
+  test "an operator resolution survives the next sync" do
+    link_standard_balances
+    split = card_activity("3006", "<strong>Hotel</strong>", "300 CHF").merge("secondaryAmount" => "EUR, USD")
+    sync_with(activities: [ split ])
+    record = @wise_item.ledger_records.find_by(external_key: "activity:card-3006")
+    assert record.needs_review?
+
+    WiseItem::LedgerResolution.record!(record, balance_id: "10000001", amount: "280.50", direction: "outflow")
+    sync_with(activities: [ split ])
+
+    record.reload
+    assert_equal [ "user_confirmed", BigDecimal("280.50"), "imported" ], [ record.provenance, record.amount, record.status ]
+  end
+
+  test "two profiles syncing twice create each entry once and keep salary as income" do
+    personal = WiseItem.create!(family: @family, name: "Personal", token: "t2", profile_id: "22222222", profile_type: :personal)
+    business_eur, = link_standard_balances
+    personal_eur = @family.accounts.create!(name: "Personal EUR", balance: 0, currency: "EUR", accountable: Depository.new)
+    AccountProvider.create!(account: personal_eur, provider: personal.wise_accounts.create!(balance_id: "20000001", currency: "EUR", name: "Wise EUR", raw_payload: { "type" => "STANDARD" }))
+    transfer = build_transfer(id: 7301).merge("quoteUuid" => "q-s", "reference" => "Salary")
+    quotes = { "q-s" => { "payInId" => 10000001, "payInMethod" => "BALANCE", "payOut" => "BALANCE",
+                          "paymentOptions" => [ { "payIn" => "BALANCE", "payOut" => "BALANCE", "fee" => { "total" => 0 } } ] } }
+    debit = { "id" => "b-1", "type" => "TRANSFER", "status" => "COMPLETED", "resource" => { "type" => "TRANSFER", "id" => "7301" },
+              "title" => "<strong>Me</strong>", "primaryAmount" => "100 EUR", "createdOn" => 7.days.ago.iso8601 }
+    credit = debit.merge("id" => "p-1", "title" => "<strong>My Company</strong>", "primaryAmount" => "<positive>+ 100 EUR</positive>")
+
+    2.times do
+      sync_with(activities: [ debit ], transfers: [ transfer ], quotes: quotes)
+      personal_provider = FakeWiseProvider.new(balances: [ { "id" => "20000001", "amount" => { "value" => 100, "currency" => "EUR" }, "type" => "STANDARD" } ],
+                                               activities: [ credit ], statement_fail_balance_ids: [ "20000001" ], statement_error_type: :access_forbidden)
+      WiseItem::Importer.new(personal, wise_provider: personal_provider).import
+      personal.process_accounts
+      personal.process_ledger_records
+    end
+
+    salary = personal_eur.entries.where(source: "wise", entryable_type: "Transaction").sole
+    assert_equal BigDecimal("-100"), salary.amount
+    assert_equal "standard", salary.transaction.kind
+    assert_equal "business_to_personal", salary.transaction.extra.dig("wise", "relationship", "type")
+    assert_equal 1, business_eur.entries.where(source: "wise", entryable_type: "Transaction").count
+  end
+
   # Returns failed result when balances fetch fails
 
   test "returns failed result when STANDARD balances fetch fails" do
@@ -578,6 +650,15 @@ class WiseItem::ImporterTest < ActiveSupport::TestCase
         "status" => "outgoing_payment_sent",
         "created" => 7.days.ago.strftime("%Y-%m-%d %H:%M:%S")
       }
+    end
+
+    def sync_with(activities: [], transfers: [], quotes: {})
+      provider = FakeWiseProvider.new(balances: two_balances, activities: activities, transfers: transfers, quotes: quotes,
+                                      statement_fail_balance_ids: %w[10000001 10000002], statement_error_type: :access_forbidden)
+      WiseItem::Importer.new(@wise_item, wise_provider: provider).import
+      @wise_item.process_accounts
+      @wise_item.process_ledger_records
+      provider
     end
 
     def two_balances
