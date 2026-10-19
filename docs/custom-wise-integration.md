@@ -16,7 +16,8 @@ Branch: `feature/wise-sync-improvements` (based on upstream `main`).
 | The activity feed was paged with a `cursor` query parameter; Wise expects `nextCursor`. A repeated cursor stopped the loop after the first page. | Only the newest ~100 activities were ever read. |
 | Only jar activity types (`INTERBALANCE`, `BALANCE_CASHBACK`, `BALANCE_ASSET_FEE`) were kept. | Card payments, ATM withdrawals, incoming payments, deposits and batch payments were dropped when statements were unavailable. |
 | The statement fallback was `GET /v1/transfers`, routed to balances by currency alone (`sourceCurrency` or `targetCurrency` equal to the balance currency). | Card payments and third-party incoming payments never appear there; a cross-currency transfer could be booked on two balances; direction relied on the deprecated borderless-accounts recipient id. |
-| Every `INTERBALANCE` activity was booked as an outflow on **every** STANDARD balance. | A EUR→USD conversion appeared as an outflow on the GBP balance too, and conversions were never linked as transfers. |
+| Every `INTERBALANCE` activity was booked as an outflow on **every** STANDARD balance; jar-move direction was guessed from the title starting with "to". | A EUR→USD conversion appeared as an outflow on the GBP balance too; conversions were never linked; a move *out of* a jar ("To EUR") was booked as money going in. |
+| Balance interest (`BALANCE_CASHBACK`) and fees were routed to jars only. | With no jar, they were dropped. |
 | No merchants were created. | Card spending had no merchant. |
 | The Wise balance only updated the cached `accounts.balance`. | No current-balance anchor; history was back-calculated from a cached value. |
 | `DataEnrichment` had no `wise` source. | Any Wise sync that changed the name, category or merchant of an existing entry raised `'wise' is not a valid source`. |
@@ -43,8 +44,7 @@ All requests are `GET` (`Provider::Wise#get` is the only request method).
 WiseItem::Importer (per profile, per sync)
   balances ──────────────▶ WiseAccount (active / closed / discovered, opened_at, closed_at)
   statements ────────────▶ wise_accounts.raw_transactions_payload ──▶ WiseStatement::Processor (verified)
-  activities ─┬─ jar moves, jar interest/fees ──▶ payload ──▶ WiseActivity::Processor
-              └─ everything else ─▶ WiseItem::LedgerCollector
+  activities (all) ──────▶ WiseItem::LedgerCollector
                                      transfers + quotes + recipients (cached, read once)
                                      WiseItem::LedgerReconstructor (rules, provenance)
                                      ▶ provider_ledger_records
@@ -76,6 +76,11 @@ The overall provenance is never stronger than its weakest essential field.
 Statement lines are `provider_explicit`; jar activities are `inferred`. The
 provenance is copied to `transactions.extra["wise"]` (`provenance`,
 `field_provenance`, `provenance_reason`).
+
+Operator decisions (`resolve` → provenance `user_confirmed`, never
+provider data; `accept_duplicate`; `classify`) are stored on the leg and
+survive every later sync. A `salary`/`income` classification is never netted
+away as a transfer; `internal_transfer` links the legs.
 
 Record statuses: `ready`, `imported`, `needs_review`, `excluded` (pending,
 declined, card checks, transfer orders, non-balance pay-ins), `superseded`
@@ -118,8 +123,25 @@ entry; never recreated).
   profile movements are linked. Payments to accounts Wise marks as the
   customer's own are flagged `own_account_transfer` (unmatched); no
   destination leg is invented.
-* **Refunds**: a card refund is related to the latest earlier purchase at the
-  same merchant within 180 days (full/partial; ambiguous when several).
+* **Refunds**: a card refund is its own credit leg, related to the latest
+  earlier purchase at the same merchant within 180 days (full/partial;
+  ambiguous when several); the purchase stays. A refunded outgoing transfer
+  shows in Wise as its activity turning `CANCELLED` (observed in real data;
+  there is no separate refund credit), so the debit is withdrawn.
+* **Jar moves** (same-currency `INTERBALANCE`): amounts carry no sign; Wise
+  only names the destination ("To EUR", "To Holiday"). The direction counts as
+  established only when the balances Wise lists corroborate it: the currency
+  of an existing STANDARD balance (money left a jar) or a known jar's name
+  (money went into it). Otherwise the leg is held for review. With both sides
+  known, the legs are a linked transfer; with only the STANDARD side known,
+  that leg is imported as a funds movement (never income/expense) and the
+  jar's leg is not invented.
+* **Interest and balance fees** (`BALANCE_CASHBACK`, `BALANCE_ASSET_FEE`,
+  `BALANCE_HOLD_FEE`): the only balance (STANDARD or jar) of that currency at
+  the time, else review.
+* **Kinds**: jar moves, conversions, top-ups (`BALANCE_DEPOSIT`) and payments
+  to accounts Wise marks as the customer's own are funds movements even with
+  one leg, so they never inflate income or expense.
 
 ### Merchants
 
@@ -134,20 +156,51 @@ original Wise description; `extra.wise.merchant_raw` keeps it too. A
 merchant, category, name or note the user changed is never overwritten
 (`Account::ProviderImportAdapter` locks).
 
-### Deduplication
+### Identity and deduplication
 
-Before importing a leg, in order:
-1. the leg's own external id (`wise_activity_<id>[_source|_target|_<CCY>]`);
-2. entries earlier Wise code created for the same movement are claimed
-   (`wise_transfer_<id>`, `wise_fee_<id>`, `wise_interbalance_<id>_outflow`);
-3. a verified statement line (`wise_statement_<CARD|TRANSFER|BALANCE>-<id>`)
-   wins: the leg is `superseded`;
-4. manual, CSV or YNAB entries (no external id) on the same account with the
-   same amount and currency within ±3 days: exactly one on the same day is
-   claimed; anything else → `needs_review` (`possible_duplicate`, candidate
-   entry ids recorded).
+A leg linked to an entry always updates that entry, under whatever external
+id it has. **No existing entry is ever renamed.** Before a leg is imported
+the first time, in order:
+1. entries earlier Wise code created for the same movement are adopted
+   under their existing ids (`wise_transfer_<id>`, `wise_fee_<id>`,
+   `wise_interbalance_<id>_outflow` / `_inflow`, `wise_activity_<id>`);
+2. a verified statement line (`wise_statement_<CARD|TRANSFER|BALANCE>-<id>`)
+   wins: the leg is `superseded`; when statements arrive after a leg was
+   imported, the statement updates that leg's entry in place;
+3. manual, CSV or YNAB entries (no external id), same account and currency,
+   within ±3 days, whose amount equals the full debit or (for a split fee)
+   the principal: one candidate is claimed when it is on the same day or its
+   name/notes contain the merchant, counterparty or payment reference; of
+   several, the single same-day one with a matching name; anything else →
+   `needs_review` (`possible_duplicate`, candidate entry ids recorded). A
+   claimed entry holding the full debit keeps it (no fee added on top); a
+   same-day manual fee entry is claimed as the fee.
 
-An entry the user deleted is remembered (`dismissed`) and not recreated.
+Deletions are remembered separately for the main entry and the fee entry
+(`dismissed` / `fee_deleted_by_user?`); neither is recreated, and a deleted
+fee is not folded back into the principal.
+
+When a later sync assigns a movement to a different balance (for example a
+no-longer-listed balance comes to light), the entry and its fee **move** to
+that account with every user edit; nothing stays behind. A movement linked to
+a transfer is held for review instead. Relinking a Wise balance to a
+different Sure account is the user's choice and imports afresh, like other
+providers.
+
+### Lifecycle
+
+* Pending activities (`IN_PROGRESS`) are re-read every sync, up to 120 days
+  back, and imported once completed.
+* Every `WISE_SYNC_REFRESH_INTERVAL_DAYS` (7) the last `WISE_SYNC_REFRESH_DAYS`
+  (120) are re-read in full. A movement that became `CANCELLED` (declined,
+  reversed, refunded transfer) is **withdrawn**: its entry and fee are
+  excluded, not deleted, so a category or note the user added stays; this
+  also applies to entries the user categorized, because a cancelled payment
+  must not count as spent. If the user includes the entry again, later syncs
+  leave it.
+* An amount or name Wise corrects is re-imported (the leg's digest changed);
+  locked user edits win (`Account::ProviderImportAdapter`). Tags are never
+  touched.
 
 ### Balances and reconciliation
 
@@ -178,30 +231,63 @@ the Wise balance against the net imported transactions per account.
   one balance does not affect others.
 * All writes are upserts by stable key; re-running a window changes nothing.
 
+## Validation against financial-data
+
+The reconstruction was replayed offline against financial-data's stored Wise
+observations (3,340 activities, 1,686 transfers, 1,682 quotes, 112
+recipients), with no Wise request. The harness is not in the repo (it reads
+personal data); the results:
+
+* Request parameters and response fields used by the Ruby client match what
+  Wise answered (`since`/`until`/`size`/`nextCursor`,
+  `createdDateStart`/`End` in millisecond ISO-8601; quote `payInId`,
+  `payInMethod`, `paymentOptions[].fee.total`; recipient `name.fullName`,
+  `ownedByCustomer`, `details.balanceId`/`targetProfile`).
+* The same 3,102 balance-affecting legs as the reference. For all 2,976
+  legs both import, amount, balance and fee agree exactly.
+* Differences, all intended: 30 card payments with an explicitly stated
+  debit are `inferred` here (the balance is still inferred; the reference
+  calls them exact), so exact is 342 here vs 372; 29 jar moves into a main
+  balance ("To EUR") are imported here as funds movements (reference:
+  unresolved); 164 balance-interest legs and 2 holding fees are handled
+  here (the reference ignores them); 2 unsupported types (card order,
+  acquiring capture) and cancelled/check activities are kept for
+  review/as excluded here.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `WISE_SYNC_OVERLAP_DAYS` | `14` | days re-read before the last checkpoint |
+| `WISE_SYNC_REFRESH_DAYS` / `WISE_SYNC_REFRESH_INTERVAL_DAYS` | `120` / `7` | periodic full re-read for late cancellations |
+| `WISE_DETAIL_REQUESTS_PER_SYNC` | `400` | quote/recipient requests per sync; a large backfill continues on later syncs |
 | `WISE_LINK_OWN_PROFILE_TRANSFERS` | `false` | link business ↔ personal payments as transfers |
 | `WISE_BASE_URL` | `https://api.wise.com` | unchanged |
+
+`WISE_INCLUDE_PENDING` was removed: it was never read by any code. Pending
+activities are never imported as settled.
 
 ## Operator tasks
 
 ```sh
 bin/rails wise:coverage                 # exact / inferred / unresolved legs per balance, checkpoints
 bin/rails wise:review LIMIT=100         # legs waiting for review
+bin/rails wise:resolve RECORD_ID=<uuid> BALANCE_ID=<id> [AMOUNT=280.50 DIRECTION=outflow]
+bin/rails wise:accept_duplicate RECORD_ID=<uuid> ENTRY_ID=<entry uuid>|new
+bin/rails wise:classify RECORD_ID=<uuid> AS=salary|income|expense|internal_transfer
 bin/rails wise:dismiss RECORD_ID=<uuid> # never import one leg
+bin/rails wise:closed_balances          # closed / no-longer-listed balances and their accounts
 bin/rails wise:reconcile                # Wise balance vs imported ledger, per account
-bin/rails wise:legacy_entries           # old fallback/conversion entries no leg claimed
+bin/rails wise:legacy_entries           # old fallback/conversion entries
 ```
 
 In Docker: `docker exec sure-web bin/rails wise:coverage`.
 
 ### Existing data from the old sync
 
-Entries the old code created stay. Reconstructed legs claim the ones that
-describe the same movement. Entries the old code booked on the wrong balance
+Entries the old code created stay, with their ids. Reconstructed legs adopt
+the ones that describe the same movement; the old payload rows are kept but
+no longer processed. Entries the old code booked on the wrong balance
 (a conversion as an outflow on every balance, a transfer on both currency
 balances) are not deleted automatically; `wise:legacy_entries` lists the
 candidates for manual cleanup.
@@ -212,7 +298,7 @@ New (low conflict risk):
 `app/models/provider_ledger_record.rb`, `app/models/provider_ledger_record/importer.rb`,
 `app/models/transfer/provider_linker.rb`, `app/models/merchant/name_normalizer.rb`,
 `app/models/merchant/family_resolver.rb`, `app/models/wise_activity/text.rb`,
-`app/models/wise_item/{balance_registry,ledger_reconstructor,ledger_collector,ledger_processor,ledger_linker}.rb`,
+`app/models/wise_item/{balance_registry,ledger_reconstructor,ledger_collector,ledger_processor,ledger_linker,ledger_resolution}.rb`,
 `config/merchant_aliases.yml`, `db/migrate/20261019120000_add_wise_ledger_provenance.rb`,
 `lib/tasks/wise.rake`, `bin/build-custom-image`, this document, and tests.
 
@@ -278,11 +364,13 @@ commits cherry-picked (`git switch -c wise-on-release v0.7.5-hotfix.2 && git che
 4. **Verify**: `docker logs sure-web`, `curl -fsS http://127.0.0.1:3030/up`,
    then run a Wise sync and `docker exec sure-web bin/rails wise:coverage`.
 5. **Roll back**: set the previous image tag again and `up -d`. Our
-   migration is additive, so the old image starts against the new schema.
-   But once a Wise sync has run on the new version, the old code would
-   re-import its legacy transfer rows under their old ids (the new legs
-   renamed those entries), creating duplicates. So for a clean rollback,
-   stop `sure-web`/`sure-worker` and restore the backup from step 1
-   (`pg_restore --clean --if-exists -d sure_production`) before starting
-   the old image; the same applies if upstream data migrations ran. Keep
-   previous `sure-custom:*` images until a deploy has proven itself.
+   migration is additive (one table, nullable/defaulted columns), so the old
+   image starts against the new schema and ignores them. Because existing
+   entries keep their ids, the old code finds them again and creates no
+   duplicates. What the old code does not know about stays as imported:
+   card payments, incoming payments and other reconstructed entries remain
+   (the old code neither updates nor deletes them), and the old code resumes
+   its old behavior for its own rows (including the known misrouting of
+   conversions). A database restore is only needed if the upgrade also
+   applied upstream *data* migrations you want undone (see "Version jump").
+   Keep previous `sure-custom:*` images until a deploy has proven itself.
