@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Builds a Sure image from this checkout, tagged with the commit it was built
+# from, so every deployed image maps to exactly one fork commit and older
+# images stay available for rollback. Does not push or deploy anything.
+#
+#   bin/build-custom-image                 # -> sure-custom:<12-char sha>
+#   IMAGE=ghcr.io/me/sure bin/build-custom-image
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if [ -n "$(git status --porcelain)" ] && [ "${ALLOW_DIRTY:-0}" != "1" ]; then
+  echo "Refusing to build: the working tree has uncommitted changes (ALLOW_DIRTY=1 to override)." >&2
+  exit 1
+fi
+
+sha="$(git rev-parse HEAD)"
+tag="$(git rev-parse --short=12 HEAD)"
+image="${IMAGE:-sure-custom}"
+
+docker build \
+  --pull \
+  --build-arg BUILD_COMMIT_SHA="${sha}" \
+  --label "org.opencontainers.image.revision=${sha}" \
+  --label "org.opencontainers.image.source=$(git config --get remote.origin.url || echo unknown)" \
+  --label "org.opencontainers.image.version=custom-${tag}" \
+  -t "${image}:${tag}" \
+  .
+
+echo "Built ${image}:${tag}"
