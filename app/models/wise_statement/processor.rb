@@ -45,7 +45,7 @@ class WiseStatement::Processor
 
     def import_main_transaction
       import_adapter.import_transaction(
-        external_id: "wise_statement_#{transaction_id}",
+        external_id: reconstructed_entry_external_id(:entry) || "wise_statement_#{transaction_id}",
         amount: amount,
         currency: currency,
         date: date,
@@ -59,7 +59,7 @@ class WiseStatement::Processor
     # entry (mirroring WiseEntry::Processor) to preserve the balance impact.
     def import_fee_transaction
       import_adapter.import_transaction(
-        external_id: "wise_statement_#{transaction_id}_fee",
+        external_id: reconstructed_entry_external_id(:fee_entry) || "wise_statement_#{transaction_id}_fee",
         amount: fee,
         currency: currency,
         date: date,
@@ -67,6 +67,23 @@ class WiseStatement::Processor
         source: "wise",
         extra: { wise: { statement_id: transaction_id, type: "FEE", fee: fee } }
       )
+    end
+
+    # The same movement may already be in the ledger, reconstructed from Wise
+    # activities before statements were available (WiseItem::LedgerProcessor).
+    # The verified line then updates that entry in place, under its existing
+    # external id, instead of adding a second one.
+    def reconstructed_entry_external_id(association)
+      reference = statement[:referenceNumber].presence
+      return nil unless reference
+
+      @reconstructed_record ||= ProviderLedgerRecord
+        .where(item: wise_account.wise_item, provider_account: wise_account)
+        .where("details->>'statement_reference' = ?", reference)
+        .where.not(entry_id: nil)
+        .first
+      entry = @reconstructed_record&.public_send(association)
+      entry.external_id if entry&.account_id == account.id
     end
 
     def transaction_id

@@ -85,4 +85,18 @@ class WiseStatement::ProcessorTest < ActiveSupport::TestCase
     assert_equal BigDecimal("10.00"), entry.amount
     assert_equal 1, @account.entries.where(source: "wise").count
   end
+  test "a statement line updates the entry reconstructed from activities instead of adding one" do
+    reconstructed = @account.entries.create!(name: "Lidl", date: Date.new(2024, 1, 2), amount: 25, currency: "EUR",
+                                             external_id: "wise_activity_card-1", source: "wise", entryable: Transaction.new)
+    ProviderLedgerRecord.create!(family: @account.family, provider_key: "wise", item: @wise_account.wise_item, provider_account: @wise_account,
+                                 external_key: "activity:card-1", category: "card_payment", provenance: "inferred", status: :superseded,
+                                 amount: 25, currency: "EUR", entry: reconstructed, details: { "statement_reference" => "CARD-1" })
+    statement = { "type" => "DEBIT", "date" => "2024-01-02T10:00:00Z", "amount" => { "value" => "-25.00", "currency" => "EUR" },
+                  "referenceNumber" => "CARD-1", "details" => { "description" => "Card transaction at Lidl" } }
+
+    assert_no_difference -> { @account.entries.count } do
+      WiseStatement::Processor.new(statement, wise_account: @wise_account).process
+    end
+    assert_equal "statement", reconstructed.reload.transaction.extra.dig("wise", "source")
+  end
 end

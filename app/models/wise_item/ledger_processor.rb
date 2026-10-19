@@ -5,13 +5,23 @@
 # when its data changed since the last import, so daily syncs stay cheap and
 # repeated runs are no-ops.
 #
-# Entries created by earlier Wise sync code for the same movement are claimed
-# rather than duplicated: the legacy transfer fallback ("wise_transfer_<id>",
-# "wise_fee_<id>") and the old conversion import ("wise_interbalance_<id>_outflow").
+# Entries created by earlier Wise sync code for the same movement are adopted
+# under their existing ids rather than duplicated or renamed: the legacy
+# transfer fallback ("wise_transfer_<id>", "wise_fee_<id>") and the old jar
+# and conversion import ("wise_interbalance_<id>_outflow" / "_inflow"). Older
+# code that still knows those ids therefore finds the same entries.
+#
+# Kinds: legs of a movement between the customer's own money (jar moves,
+# conversions, top-ups, payments to an account Wise marks as their own, or
+# what an operator classified as an internal transfer) are funds movements,
+# so a missing counterpart leg never turns them into income or expense.
+# Business <-> personal payments stay income and expense unless classified
+# otherwise.
 class WiseItem::LedgerProcessor
   SOURCE = "wise"
 
   Result = Data.define(:imported, :needs_review, :dismissed, :skipped, :failed)
+  OWN_MONEY_RELATIONSHIPS = %w[currency_conversion jar_move internal_transfer own_account_transfer].freeze
 
   def initialize(wise_item)
     @wise_item = wise_item
@@ -41,12 +51,14 @@ class WiseItem::LedgerProcessor
       end
 
       merchant = merchant_for(record)
-      claim_legacy_fee!(record, account)
       outcome = ProviderLedgerRecord::Importer.new(record, account: account, source: SOURCE).import(
         name: name_for(record),
         merchant: merchant,
+        kind: kind_for(record),
         extra: extra_for(record),
         legacy_external_ids: legacy_external_ids(record),
+        legacy_fee_external_ids: legacy_fee_external_ids(record),
+        match_terms: [ record.merchant_name, merchant&.name, record.counterparty_name, record.payment_reference ],
         fee_name: I18n.t("wise_items.entries.fee_name")
       )
 
@@ -76,7 +88,8 @@ class WiseItem::LedgerProcessor
       Digest::SHA256.hexdigest([
         record.amount&.to_s, record.currency, record.fee_amount&.to_s, record.occurred_at&.iso8601,
         record.provenance, record.field_provenance, record.name, record.counterparty_name,
-        record.merchant_name, record.payment_reference, record.relationship
+        record.merchant_name, record.payment_reference, record.relationship, record.provider_account_id,
+        record.classification_override, kind_for(record)
       ].to_json)
     end
 
@@ -102,6 +115,8 @@ class WiseItem::LedgerProcessor
         I18n.t("wise_items.ledger.conversion", from: record.details["source_currency"], to: record.details["target_currency"])
       when "batch_payment"
         I18n.t("wise_items.ledger.batch_payment", name: record.counterparty_name || record.name)
+      when "jar_move"
+        I18n.t("wise_items.ledger.jar_move", destination: record.details["destination_title"])
       else
         [ record.counterparty_name || record.name, record.payment_reference ].compact_blank.uniq.join(" - ")
       end.presence || I18n.t("wise_items.entries.default_name")
@@ -139,18 +154,29 @@ class WiseItem::LedgerProcessor
         record.provider_resource_id.present? && record.provider_resource_type == "TRANSFER" ? [ "wise_transfer_#{record.provider_resource_id}" ] : []
       when "currency_conversion"
         record.details["conversion_leg"] == "source" ? [ "wise_interbalance_#{record.provider_resource_id}_outflow" ] : []
+      when "jar_move"
+        [ record.details["legacy_external_id"] ]
       else
         []
-      end
+      end.compact
     end
 
     # The legacy fallback imported a transfer's fee as its own entry.
-    def claim_legacy_fee!(record, account)
-      return unless record.category == "outgoing_payment" && record.provider_resource_id.present?
+    def legacy_fee_external_ids(record)
+      return [] unless record.category == "outgoing_payment" && record.provider_resource_id.present?
 
-      new_id = ProviderLedgerRecord::Importer.external_id_for(SOURCE, record.external_key) + "_fee"
-      return if account.entries.exists?(source: SOURCE, external_id: new_id)
+      [ "wise_fee_#{record.provider_resource_id}" ]
+    end
 
-      account.entries.find_by(source: SOURCE, external_id: "wise_fee_#{record.provider_resource_id}")&.update!(external_id: new_id)
+    def kind_for(record)
+      case record.classification_override
+      when "internal_transfer" then return "funds_movement"
+      when "income", "expense", "salary" then return nil
+      end
+
+      own_money = record.category.in?(%w[jar_move currency_conversion]) ||
+        record.details["activity_type"] == "BALANCE_DEPOSIT" ||
+        OWN_MONEY_RELATIONSHIPS.include?(record.relationship["type"])
+      own_money ? "funds_movement" : nil
     end
 end

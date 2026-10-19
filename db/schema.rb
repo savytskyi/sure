@@ -1975,6 +1975,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
     t.uuid "family_id", null: false
     t.decimal "fee_amount", precision: 19, scale: 4
     t.string "fee_currency"
+    t.uuid "fee_entry_id"
+    t.datetime "fee_imported_at"
     t.jsonb "field_provenance", default: {}, null: false
     t.datetime "imported_at"
     t.uuid "item_id", null: false
@@ -2002,6 +2004,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
     t.index ["family_id", "provider_key", "provider_transfer_id"], name: "index_provider_ledger_records_on_transfer"
     t.index ["family_id", "status"], name: "index_provider_ledger_records_on_family_id_and_status"
     t.index ["family_id"], name: "index_provider_ledger_records_on_family_id"
+    t.index ["fee_entry_id"], name: "index_provider_ledger_records_on_fee_entry_id"
     t.index ["item_type", "item_id", "external_key"], name: "index_provider_ledger_records_on_item_and_external_key", unique: true
     t.index ["item_type", "item_id"], name: "index_provider_ledger_records_on_item"
     t.index ["provider_account_type", "provider_account_id"], name: "index_provider_ledger_records_on_provider_account"
@@ -3125,6 +3128,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
   add_foreign_key "plaid_items", "families"
   add_foreign_key "plaid_items", "users", column: "owner_id", on_delete: :nullify
   add_foreign_key "provider_ledger_records", "accounts", on_delete: :nullify
+  add_foreign_key "provider_ledger_records", "entries", column: "fee_entry_id", on_delete: :nullify
   add_foreign_key "provider_ledger_records", "entries", on_delete: :nullify
   add_foreign_key "provider_ledger_records", "families", on_delete: :cascade
   add_foreign_key "push_subscriptions", "users"

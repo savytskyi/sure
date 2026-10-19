@@ -35,6 +35,10 @@ class AddWiseLedgerProvenance < ActiveRecord::Migration[8.1]
       t.references :account, type: :uuid, foreign_key: { on_delete: :nullify }
       t.references :entry, type: :uuid, foreign_key: { on_delete: :nullify }
       t.datetime :imported_at
+      # A fee imported as its own entry, tracked separately so deleting just
+      # the fee is remembered too.
+      t.references :fee_entry, type: :uuid, foreign_key: { to_table: :entries, on_delete: :nullify }
+      t.datetime :fee_imported_at
       t.timestamps
     end
 
