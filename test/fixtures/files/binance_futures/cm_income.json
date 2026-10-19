@@ -1,0 +1,9 @@
+[
+  { "symbol": "", "incomeType": "TRANSFER", "income": "0.50000000", "asset": "BTC", "info": "TRANSFER", "time": 1760140800000, "tranId": "770001", "tradeId": "" },
+  { "symbol": "BTCUSD_PERP", "incomeType": "COMMISSION", "income": "-0.00002419", "asset": "BTC", "info": "COMMISSION", "time": 1760144400000, "tranId": "770002", "tradeId": "880001" },
+  { "symbol": "BTCUSD_PERP", "incomeType": "FUNDING_FEE", "income": "0.00000231", "asset": "BTC", "info": "FUNDING_FEE", "time": 1760169600000, "tranId": "770003", "tradeId": "" },
+  { "symbol": "BTCUSD_PERP", "incomeType": "FUNDING_FEE", "income": "-0.00000112", "asset": "BTC", "info": "FUNDING_FEE", "time": 1760198400000, "tranId": "770004", "tradeId": "" },
+  { "symbol": "BTCUSD_PERP", "incomeType": "REALIZED_PNL", "income": "0.00150000", "asset": "BTC", "info": "REALIZED_PNL", "time": 1760230800000, "tranId": "770005", "tradeId": "880002" },
+  { "symbol": "BTCUSD_PERP", "incomeType": "COMMISSION", "income": "-0.00002419", "asset": "BTC", "info": "COMMISSION", "time": 1760230800000, "tranId": "770005", "tradeId": "880002" },
+  { "symbol": "BTCUSD_250926", "incomeType": "DELIVERED_SETTELMENT", "income": "0.00080000", "asset": "BTC", "info": "DELIVERED_SETTELMENT", "time": 1760313600000, "tranId": "770006", "tradeId": "" }
+]

@@ -87,38 +87,15 @@ class BinanceAccount::ProcessorTest < ActiveSupport::TestCase
     assert_in_delta 1000.0, @account.balance, 0.01
   end
 
-  test "processes futures trades correctly" do
+  test "futures fills are not fetched or recorded as spot trades" do
     @family.update!(currency: "USD")
-    @ba.update!(raw_payload: { "assets" => [ { "symbol" => "BTC", "total" => "1.0" } ] })
-
-    provider = mock
-    @item.stubs(:binance_provider).returns(provider)
-    @ba.stubs(:binance_item).returns(@item)
-    provider.stubs(:get_spot_trades).returns([])
-    provider.stubs(:get_spot_price).returns("50000.0")
-    provider.stubs(:get_all_p2p_trades).returns([]) # Skip P2P
-
-    # No cached trades -> initial sync walks time windows. First window returns
-    # the trade, every later window/pair returns nothing.
-    provider.stubs(:get_futures_trades).returns(
-      [ { "id" => 1, "time" => 1610000000000, "qty" => "0.1", "price" => "40000.0", "quoteQty" => "4000.0", "commission" => "0.0", "commissionAsset" => "USDT", "buyer" => true } ],
-      []
+    cached_fill = { "id" => 100, "time" => 1610000000000 }
+    @ba.update!(
+      raw_payload: { "assets" => [ { "symbol" => "BTC", "total" => "1.0" } ] },
+      raw_transactions_payload: { "futures" => { "BTCUSDT" => [ cached_fill ] } }
     )
 
-    Security.create!(ticker: "CRYPTO:BTC", name: "Bitcoin", price_provider: "binance_public")
-
-    assert_difference "Entry.count", 1 do
-      BinanceAccount::Processor.new(@ba).process
-    end
-
-    assert @account.entries.exists?(external_id: "binance_futures_BTCUSDT_1")
-  end
-
-  test "initial futures sync walks multiple 7-day windows from sync_start_date" do
-    @family.update!(currency: "USD")
-    @item.update!(sync_start_date: 20.days.ago)
-    @ba.update!(raw_payload: { "assets" => [ { "symbol" => "BTC", "total" => "1.0" } ] })
-
+    # A bare mock: any call to get_futures_trades would fail the test.
     provider = mock
     @item.stubs(:binance_provider).returns(provider)
     @ba.stubs(:binance_item).returns(@item)
@@ -126,31 +103,21 @@ class BinanceAccount::ProcessorTest < ActiveSupport::TestCase
     provider.stubs(:get_spot_price).returns("50000.0")
     provider.stubs(:get_all_p2p_trades).returns([])
 
-    trade = ->(id) {
-      { "id" => id, "time" => 1610000000000, "qty" => "0.1", "price" => "40000.0", "quoteQty" => "4000.0", "commission" => "0.0", "commissionAsset" => "USDT", "buyer" => true }
-    }
-
-    # A 20-day span splits into three consecutive 7-day windows; each returns a
-    # distinct trade, then all remaining windows/pairs return nothing.
-    provider.stubs(:get_futures_trades).returns([ trade.call(1) ], [ trade.call(2) ], [ trade.call(3) ], [])
-
-    Security.create!(ticker: "CRYPTO:BTC", name: "Bitcoin", price_provider: "binance_public")
-
-    assert_difference "Entry.count", 3 do
+    assert_no_difference "Entry.count" do
       BinanceAccount::Processor.new(@ba).process
     end
 
-    assert @account.entries.exists?(external_id: "binance_futures_BTCUSDT_1")
-    assert @account.entries.exists?(external_id: "binance_futures_BTCUSDT_2")
-    assert @account.entries.exists?(external_id: "binance_futures_BTCUSDT_3")
+    assert_equal [ cached_fill ], @ba.reload.raw_transactions_payload.dig("futures", "BTCUSDT")
   end
 
-  test "incremental sync paginates by fromId across full pages" do
+  test "COIN-M income becomes BTC quantity changes, idempotently, and never touches the balance" do
     @family.update!(currency: "USD")
+    @account.update!(currency: "USD")
     @ba.update!(
-      raw_payload: { "assets" => [ { "symbol" => "BTC", "total" => "1.0" } ] },
-      raw_transactions_payload: {
-        "futures" => { "BTCUSDT" => [ { "id" => 100, "time" => 1610000000000 } ] }
+      current_balance: 53_637.50,
+      raw_payload: {
+        "assets" => [ { "symbol" => "BTC", "total" => "0.86512097", "source" => "coin_futures" } ],
+        "coin_futures" => { "assets" => [] }
       }
     )
 
@@ -158,18 +125,81 @@ class BinanceAccount::ProcessorTest < ActiveSupport::TestCase
     @item.stubs(:binance_provider).returns(provider)
     @ba.stubs(:binance_item).returns(@item)
     provider.stubs(:get_spot_trades).returns([])
+    provider.stubs(:get_spot_price).returns("62000.0")
+    provider.stubs(:get_all_p2p_trades).returns([])
+    provider.stubs(:get_historical_price).returns("60000.0")
+    provider.stubs(:get_coin_futures_income).returns(JSON.parse(file_fixture("binance_futures/cm_income.json").read))
+    provider.expects(:get_futures_income).never # USD-M did not answer this sync
+
+    btc = Security.create!(ticker: "CRYPTO:BTC", name: "Bitcoin", price_provider: "binance_public")
+
+    BinanceAccount::Processor.new(@ba).process
+    assert_no_difference [ "Entry.count", "DerivativeLedgerEvent.count" ] do
+      BinanceAccount::Processor.new(@ba).process
+    end
+
+    entries = @account.entries.includes(:entryable).to_a
+    # Commission+funding on day one, realized P&L+commission on day two, one
+    # settlement; the transfer from Spot is excluded.
+    assert_equal 5, entries.size
+    assert entries.all? { |e| e.amount.zero? && e.entryable.security == btc }
+    assert_equal BigDecimal("0.00225281"), entries.sum { |e| e.entryable.qty }
+    assert_in_delta 53_637.50, @account.reload.balance, 0.01, "the balance is Binance's equity, not a sum of income"
+    assert DerivativeLedgerEvent.find_by(provider_type: "TRANSFER").excluded?
+  end
+
+  test "initial spot sync walks 24-hour windows from sync_start_date" do
+    @family.update!(currency: "USD")
+    @item.update!(sync_start_date: 3.days.ago)
+    @ba.update!(raw_payload: { "assets" => [ { "symbol" => "BTC", "total" => "1.0" } ] })
+
+    provider = mock
+    @item.stubs(:binance_provider).returns(provider)
+    @ba.stubs(:binance_item).returns(@item)
     provider.stubs(:get_spot_price).returns("50000.0")
     provider.stubs(:get_all_p2p_trades).returns([])
 
-    full_page = (101..1100).map do |id|
-      { "id" => id, "time" => 1610000000000, "qty" => "0.1", "price" => "40000.0", "quoteQty" => "4000.0", "commission" => "0.0", "commissionAsset" => "USDT", "buyer" => true }
-    end
-    last_page = [ { "id" => 1101, "time" => 1610000000000, "qty" => "0.1", "price" => "40000.0", "quoteQty" => "4000.0", "commission" => "0.0", "commissionAsset" => "USDT", "buyer" => true } ]
+    trade = ->(id) {
+      { "id" => id, "time" => 1610000000000, "qty" => "0.1", "price" => "40000.0", "quoteQty" => "4000.0", "commission" => "0.0", "commissionAsset" => "USDT", "isBuyer" => true }
+    }
 
-    # First BTCUSDT futures call returns a full 1000-row page (triggers a second
-    # fromId request); the follow-up returns the final partial page. Other pairs
-    # have no cached trades, so their window scans return nothing.
-    provider.stubs(:get_futures_trades).returns(full_page, last_page, [])
+    # Each of the first three 24-hour windows returns a distinct trade; every
+    # later window and pair returns nothing.
+    provider.stubs(:get_spot_trades).returns([ trade.call(1) ], [ trade.call(2) ], [ trade.call(3) ], [])
+
+    Security.create!(ticker: "CRYPTO:BTC", name: "Bitcoin", price_provider: "binance_public")
+
+    assert_difference "Entry.count", 3 do
+      BinanceAccount::Processor.new(@ba).process
+    end
+
+    assert @account.entries.exists?(external_id: "binance_spot_BTCUSDT_1")
+    assert @account.entries.exists?(external_id: "binance_spot_BTCUSDT_3")
+  end
+
+  test "incremental spot sync paginates by fromId across full pages" do
+    @family.update!(currency: "USD")
+    @ba.update!(
+      raw_payload: { "assets" => [ { "symbol" => "BTC", "total" => "1.0" } ] },
+      raw_transactions_payload: {
+        "spot" => { "BTCUSDT" => [ { "id" => 100, "time" => 1610000000000 } ] }
+      }
+    )
+
+    provider = mock
+    @item.stubs(:binance_provider).returns(provider)
+    @ba.stubs(:binance_item).returns(@item)
+    provider.stubs(:get_spot_price).returns("50000.0")
+    provider.stubs(:get_all_p2p_trades).returns([])
+
+    fill = ->(id) {
+      { "id" => id, "time" => 1610000000000, "qty" => "0.1", "price" => "40000.0", "quoteQty" => "4000.0", "commission" => "0.0", "commissionAsset" => "USDT", "isBuyer" => true }
+    }
+    full_page = (101..1100).map { |id| fill.call(id) }
+
+    # The cached pair pages forward by fromId: a full page triggers a second
+    # request, whose partial page ends it. Uncached pairs return nothing.
+    provider.stubs(:get_spot_trades).returns(full_page, [ fill.call(1101) ], [])
 
     Security.create!(ticker: "CRYPTO:BTC", name: "Bitcoin", price_provider: "binance_public")
 
@@ -177,8 +207,8 @@ class BinanceAccount::ProcessorTest < ActiveSupport::TestCase
       BinanceAccount::Processor.new(@ba).process
     end
 
-    assert @account.entries.exists?(external_id: "binance_futures_BTCUSDT_101")
-    assert @account.entries.exists?(external_id: "binance_futures_BTCUSDT_1101")
+    assert @account.entries.exists?(external_id: "binance_spot_BTCUSDT_101")
+    assert @account.entries.exists?(external_id: "binance_spot_BTCUSDT_1101")
   end
 
   test "processes P2P BUY trades with double-entry logic and exact native fiat" do

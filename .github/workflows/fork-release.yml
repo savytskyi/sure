@@ -7,7 +7,8 @@
 #   every newer migration, checks the result against db/schema.rb, checks
 #   that this fork's migration reverses cleanly, and boots the previous
 #   release's code against the migrated database (rollback compatibility)
-# - wise: the Wise and provider-ledger tests on their own, for a fast signal
+# - wise: the Wise, provider-ledger, Binance futures and Kraken tests on
+#   their own, for a fast signal
 # - image: builds the production image for linux/amd64 and smoke-tests it;
 #   publishes it only on a manual run with `publish: true`
 #
@@ -94,6 +95,14 @@ jobs:
             test/models/provider/wise_adapter_test.rb test/models/provider_ledger_record test/models/merchant \
             test/models/transfer/provider_linker_test.rb test/controllers/wise_items_controller_test.rb \
             test/controllers/wise_sca_localization_test.rb
+
+      - name: Binance futures, derivatives and Kraken tests
+        run: |
+          bin/rails test test/models/binance_item test/models/binance_account test/models/binance_item_test.rb \
+            test/models/binance_account_test.rb test/models/provider/binance_test.rb \
+            test/controllers/binance_items_controller_test.rb test/models/derivative_position_test.rb \
+            test/models/derivative_ledger_event test/lib/tasks/binance_rake_test.rb \
+            test/models/kraken_account test/models/kraken_item test/models/kraken_item_test.rb
 
   migrations:
     runs-on: ubuntu-latest
@@ -184,8 +193,9 @@ jobs:
           describe schema_reference | normalize > "$RUNNER_TEMP/reference.txt"
           diff -u "$RUNNER_TEMP/reference.txt" "$RUNNER_TEMP/migrated.txt"
 
-      - name: This fork's migration reverses and reapplies cleanly
+      - name: This fork's migrations reverse and reapply cleanly
         run: |
+          bin/rails db:migrate:down VERSION=20261019150000
           bin/rails db:migrate:down VERSION=20261019120000
           bin/rails db:migrate
 

@@ -1,8 +1,19 @@
 # frozen_string_literal: true
 
-# Updates account balance and imports spot trades.
+# Updates account balance, imports spot and P2P trades, and writes the
+# futures wallets' income (realized P&L, funding, fees, settlements) as
+# quantity changes of their margin assets.
+#
+# Futures fills are not trades of the asset. A BTCUSDT perpetual buy does not
+# put BTC in the account and its notional never left it; recorded as a spot
+# buy it added BTC to every earlier holding and moved cash by the full
+# notional. They are no longer imported (see `binance:legacy_futures_trades`
+# for entries earlier versions created); what a fill does to the wallet
+# arrives as its realized P&L and commission income instead.
 class BinanceAccount::Processor
   include BinanceAccount::UsdConverter
+
+  MARKET_NAMES = { "usds_m" => "USDⓈ-M", "coin_m" => "COIN-M" }.freeze
 
   # Quote currencies probed when fetching trade history. Ordered by prevalence so
   # the most common pairs are tried first and rate-limit weight is front-loaded.
@@ -46,6 +57,7 @@ class BinanceAccount::Processor
     end
 
     fetch_and_process_trades
+    process_futures_ledger
 
     # The account was created, and anchored, before any of this history
     # existed. Now that it does, the anchor has to precede it.
@@ -53,6 +65,54 @@ class BinanceAccount::Processor
   end
 
   private
+
+    # Futures income is read and written apart from the trades: a futures
+    # outage or a key without futures access must not stop spot history.
+    def process_futures_ledger
+      provider = binance_account.binance_item&.binance_provider
+      return unless provider
+
+      importer = BinanceAccount::FuturesIncomeImporter.new(binance_account, provider: provider)
+      return if importer.active_markets.empty?
+
+      importer.import
+      DerivativeLedgerEvent.reassign!(provider_account: binance_account, account: binance_account.current_account)
+
+      DerivativeLedgerEvent::EntryWriter.new(
+        account: binance_account.current_account,
+        source: "binance",
+        security_for: ->(asset) { BinanceAccount::SecurityResolver.resolve("CRYPTO:#{asset}", asset) },
+        price_for: ->(asset, date) { unit_price_in_target_currency(provider, asset, date) },
+        market_names: MARKET_NAMES
+      ).write
+    rescue StandardError => e
+      DebugLogEntry.capture(
+        category: "provider_sync",
+        level: "error",
+        message: "Binance futures income could not be processed",
+        source: self.class.name,
+        provider_key: "binance",
+        family: binance_account.binance_item.family,
+        account_provider: binance_account.account_provider,
+        metadata: { binance_account_id: binance_account.id, error_class: e.class.name, error: e.message }
+      )
+      Rails.logger.error "BinanceAccount::Processor - futures income failed for #{binance_account.id}: #{e.message}"
+    end
+
+    # Daily close of asset/USDT, in the family's currency. nil when Binance
+    # has no USDT market for the asset; the entry is then marked price_missing.
+    def unit_price_in_target_currency(provider, asset, date)
+      @unit_prices ||= {}
+      key = [ asset, date ]
+      return @unit_prices[key] if @unit_prices.key?(key)
+
+      usd = if BinanceAccount::STABLECOINS.include?(asset)
+        1.to_d
+      else
+        provider.get_historical_price("#{asset}USDT", date)&.to_d
+      end
+      @unit_prices[key] = usd.present? && usd.positive? ? convert_from_usd(usd, date: date).first : nil
+    end
 
     def target_currency
       binance_account.binance_item.family.currency
@@ -85,10 +145,10 @@ class BinanceAccount::Processor
       # 2. Fetch P2P Trades (This now runs even if you have no spot assets)
       new_p2p = fetch_new_p2p_trades(provider, existing_p2p)
 
-      # 3. Handle Spot & Futures symbols
+      # 3. Handle Spot symbols. Futures fills are deliberately not fetched
+      # (see the class comment); fills cached by earlier versions are kept.
       symbols = extract_trade_symbols
       new_trades_by_symbol = {}
-      new_futures_by_symbol = {}
 
       # Only attempt to loop if we actually have symbols (e.g., BTC, ETH)
       if symbols.any?
@@ -101,13 +161,6 @@ class BinanceAccount::Processor
             rescue Provider::Binance::InvalidSymbolError => e
               Rails.logger.debug "BinanceAccount::Processor - skipping spot #{pair}: #{e.message}"
             end
-
-            begin
-              new_futures = fetch_new_trades(provider, pair, existing_futures[pair], :futures)
-              new_futures_by_symbol[pair] = new_futures if new_futures.present?
-            rescue Provider::Binance::InvalidSymbolError => e
-              Rails.logger.debug "BinanceAccount::Processor - skipping futures #{pair}: #{e.message}"
-            end
           end
         end
       end
@@ -117,12 +170,11 @@ class BinanceAccount::Processor
       # the method halts before updating the raw_transactions_payload cache,
       # ensuring a retry happens on the next sync execution.
       process_trades(new_trades_by_symbol, :spot) if new_trades_by_symbol.any?
-      process_trades(new_futures_by_symbol, :futures) if new_futures_by_symbol.any?
       process_p2p_trades(new_p2p) if new_p2p.any?
 
       # 5. Merge Results ONLY after successful DB insertion
       merged_spot    = existing_spot.merge(new_trades_by_symbol) { |_pair, old, new_t| old + new_t }
-      merged_futures = existing_futures.merge(new_futures_by_symbol) { |_pair, old, new_t| old + new_t }
+      merged_futures = existing_futures
       merged_p2p     = existing_p2p + new_p2p
 
       # 6. Update the Account Payload LAST (Safe Caching Boundary)

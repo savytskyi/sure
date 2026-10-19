@@ -1,0 +1,8 @@
+[
+  { "symbol": "", "incomeType": "TRANSFER", "income": "1000.00000000", "asset": "USDT", "info": "TRANSFER", "time": 1760140800000, "tranId": 9900001, "tradeId": "" },
+  { "symbol": "ETHUSDT", "incomeType": "COMMISSION", "income": "-0.48490000", "asset": "USDT", "info": "COMMISSION", "time": 1760144400000, "tranId": 9900002, "tradeId": "5500001" },
+  { "symbol": "ETHUSDT", "incomeType": "FUNDING_FEE", "income": "-0.12000000", "asset": "USDT", "info": "FUNDING_FEE", "time": 1760169600000, "tranId": 9900003, "tradeId": "" },
+  { "symbol": "ETHUSDT", "incomeType": "REALIZED_PNL", "income": "35.20000000", "asset": "USDT", "info": "REALIZED_PNL", "time": 1760230800000, "tranId": 9900004, "tradeId": "5500002" },
+  { "symbol": "ETHUSDT", "incomeType": "COMMISSION", "income": "-0.50110000", "asset": "USDT", "info": "COMMISSION", "time": 1760230800000, "tranId": 9900004, "tradeId": "5500002" },
+  { "symbol": "", "incomeType": "SOME_NEW_TYPE", "income": "1.00000000", "asset": "USDT", "info": "", "time": 1760313600000, "tranId": 9900005, "tradeId": "" }
+]
