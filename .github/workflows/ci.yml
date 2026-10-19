@@ -153,7 +153,12 @@ jobs:
           bin/rails db:seed
 
       - name: Unit and integration tests
-        run: bin/rails test
+        run: bin/rails test 2>&1 | tee "$RUNNER_TEMP/unit-tests.log"
+
+      - name: Publish unit test failure diagnostics
+        if: failure()
+        run: |
+          ruby -e 'path = ARGV.fetch(0); if File.exist?(path); text = File.readlines(path).last(160).join; puts "::error title=Unit test diagnostics::#{text.gsub("%", "%25").gsub("\r", "%0D").gsub("\n", "%0A")}"; end' "$RUNNER_TEMP/unit-tests.log"
 
   test_system:
     runs-on: ubuntu-latest

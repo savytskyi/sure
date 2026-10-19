@@ -102,7 +102,12 @@ jobs:
           bin/rails test test/models/wise* test/models/wise*/ test/models/provider/wise_test.rb \
             test/models/provider/wise_adapter_test.rb test/models/provider_ledger_record test/models/merchant \
             test/models/transfer/provider_linker_test.rb test/controllers/wise_items_controller_test.rb \
-            test/controllers/wise_sca_localization_test.rb
+            test/controllers/wise_sca_localization_test.rb 2>&1 | tee "$RUNNER_TEMP/wise-tests.log"
+
+      - name: Publish Wise failure diagnostics
+        if: failure()
+        run: |
+          ruby -e 'path = ARGV.fetch(0); if File.exist?(path); text = File.readlines(path).last(160).join; puts "::error title=Wise test diagnostics::#{text.gsub("%", "%25").gsub("\r", "%0D").gsub("\n", "%0A")}"; end' "$RUNNER_TEMP/wise-tests.log"
 
       - name: Binance futures, derivatives and Kraken tests
         run: |
