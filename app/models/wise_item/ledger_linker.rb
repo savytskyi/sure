@@ -20,7 +20,7 @@
 # reimbursements are not neutral transfers.
 class WiseItem::LedgerLinker
   REFUND_WINDOW = 180.days
-  NEUTRAL_TYPES = %w[currency_conversion internal_transfer].freeze
+  NEUTRAL_TYPES = %w[currency_conversion jar_move internal_transfer].freeze
   OWN_PROFILE_TYPES = %w[business_to_personal personal_to_business].freeze
 
   def initialize(family)
@@ -50,6 +50,7 @@ class WiseItem::LedgerLinker
     pairs.each do |outflow|
       inflow = records.find_by(id: outflow.relationship["counterpart_id"])
       next unless inflow&.imported? && inflow.entry
+      next unless linkable_pair?(outflow, inflow)
 
       result = Transfer::ProviderLinker.new(outflow_entry: outflow.entry, inflow_entry: inflow.entry).link
       state = result.status.to_s
@@ -68,10 +69,19 @@ class WiseItem::LedgerLinker
     end
 
     def linkable?(relationship)
-      return false unless relationship["status"] == "confirmed" && relationship["counterpart_id"].present?
-      return true if NEUTRAL_TYPES.include?(relationship["type"])
+      relationship["status"] == "confirmed" && relationship["counterpart_id"].present?
+    end
 
-      OWN_PROFILE_TYPES.include?(relationship["type"]) && Rails.configuration.x.wise.link_own_profile_transfers
+    # An operator's classification (bin/rails wise:classify) wins: salary or
+    # income is never netted away as a transfer, an internal transfer is.
+    def linkable_pair?(outflow, inflow)
+      overrides = [ outflow.classification_override, inflow.classification_override ].compact
+      return false if overrides.intersect?(%w[salary income expense])
+      return true if overrides.include?("internal_transfer")
+
+      type = outflow.relationship["type"]
+      NEUTRAL_TYPES.include?(type) ||
+        (OWN_PROFILE_TYPES.include?(type) && Rails.configuration.x.wise.link_own_profile_transfers)
     end
 
     def profile_type(record)
@@ -93,12 +103,22 @@ class WiseItem::LedgerLinker
       relationships[b.id] = { "type" => type, "status" => status, "counterpart_id" => a.id, "counterpart_key" => a.external_key, "basis" => basis }
     end
 
+    # Both legs of one conversion or jar-move activity.
     def annotate_conversions(legs, by_key, relationships)
       legs.each do |record|
-        next unless record.category == "currency_conversion" && record.details["conversion_leg"] == "source"
-
-        target = by_key[[ record.item_id, record.details["counterpart_key"] ]]
-        pair!(relationships, record, target, type: "currency_conversion", basis: "same Wise conversion activity") if target
+        if record.category == "currency_conversion" && record.details["conversion_leg"] == "source"
+          target = by_key[[ record.item_id, record.details["counterpart_key"] ]]
+          pair!(relationships, record, target, type: "currency_conversion", basis: "same Wise conversion activity") if target
+        elsif record.category == "jar_move" && record.outflow?
+          counterpart = by_key[[ record.item_id, record.details["counterpart_key"] ]] if record.details["counterpart_key"]
+          if counterpart
+            pair!(relationships, record, counterpart, type: "jar_move", basis: "same Wise jar move activity")
+          else
+            relationships[record.id] = { "type" => "jar_move", "status" => "unmatched", "basis" => "the jar side is not a known balance" }
+          end
+        elsif record.category == "jar_move" && record.details["counterpart_key"].blank? && record.amount
+          relationships[record.id] = { "type" => "jar_move", "status" => "unmatched", "basis" => "the jar side is not a known balance" }
+        end
       end
     end
 

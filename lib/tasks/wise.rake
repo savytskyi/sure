@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 # Operator tools for the reconstructed Wise ledger. `coverage`, `review`,
-# `reconcile` and `legacy_entries` only read. `dismiss` changes one record.
+# `reconcile`, `closed_balances` and `legacy_entries` only read. `dismiss`,
+# `resolve`, `accept_duplicate` and `classify` record a decision on one leg,
+# which every later sync keeps.
 namespace :wise do
   desc "Exact / inferred / unresolved Wise legs per connection and account"
   task coverage: :environment do
@@ -37,6 +39,43 @@ namespace :wise do
     record = ProviderLedgerRecord.for_provider("wise").find(ENV.fetch("RECORD_ID"))
     record.update!(status: :dismissed, reason: "dismissed_by_operator")
     puts "Dismissed #{record.external_key}"
+  end
+
+  desc "Resolve an unresolved Wise leg (RECORD_ID=... BALANCE_ID=... [AMOUNT=... DIRECTION=inflow|outflow])"
+  task resolve: :environment do
+    record = ProviderLedgerRecord.for_provider("wise").find(ENV.fetch("RECORD_ID"))
+    WiseItem::LedgerResolution.record!(record, balance_id: ENV.fetch("BALANCE_ID"), amount: ENV["AMOUNT"], direction: ENV["DIRECTION"])
+    puts "Resolved #{record.external_key}: #{record.amount&.to_s('F')} #{record.currency} on balance #{ENV['BALANCE_ID']} (imported on the next sync)"
+  end
+
+  desc "Decide a possible duplicate (RECORD_ID=... ENTRY_ID=<existing entry> or ENTRY_ID=new)"
+  task accept_duplicate: :environment do
+    record = ProviderLedgerRecord.for_provider("wise").find(ENV.fetch("RECORD_ID"))
+    entry_id = ENV.fetch("ENTRY_ID")
+    resolution = entry_id == "new" ? { "force_new" => true } : { "link_entry_id" => entry_id }
+    record.update!(status: :ready, details: record.details.merge("resolution" => record.resolution.merge(resolution)))
+    puts "#{record.external_key} will #{entry_id == 'new' ? 'be imported as a new entry' : "update entry #{entry_id}"} on the next sync"
+  end
+
+  desc "Classify a Wise movement (RECORD_ID=... AS=salary|income|expense|internal_transfer)"
+  task classify: :environment do
+    record = ProviderLedgerRecord.for_provider("wise").find(ENV.fetch("RECORD_ID"))
+    classification = ENV.fetch("AS")
+    raise ArgumentError, "AS must be salary, income, expense or internal_transfer" unless %w[salary income expense internal_transfer].include?(classification)
+
+    record.update!(details: record.details.merge("classification" => classification))
+    puts "#{record.external_key} classified as #{classification} (applied on the next sync)"
+  end
+
+  desc "Wise balances no longer listed by Wise (closed or only referenced), with their linked accounts"
+  task closed_balances: :environment do
+    WiseAccount.where(status: %w[closed discovered]).includes(:wise_item, account_provider: :account).find_each do |wise_account|
+      account = wise_account.current_account
+      window = wise_account.discovered? ? "used #{wise_account.first_observed_at&.to_date}..#{wise_account.last_observed_at&.to_date}" : "closed by #{wise_account.closed_at&.to_date}"
+      puts [ wise_account.wise_item.name, wise_account.balance_id, wise_account.currency, wise_account.status, window,
+             account ? "linked to #{account.name} (#{account.status})" : "not linked",
+             "#{wise_account.ledger_records.where.not(status: :excluded).count} legs" ].join(" | ")
+    end
   end
 
   desc "Compare each linked Wise balance with the balance its imported ledger implies"

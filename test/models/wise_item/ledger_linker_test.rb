@@ -88,6 +88,39 @@ class WiseItem::LedgerLinkerTest < ActiveSupport::TestCase
     assert_equal "full", refund.relationship["refund_type"]
   end
 
+  test "an operator classification as salary keeps a business payment as income even when linking is enabled" do
+    debit = leg(@business, "activity:b1", "outgoing_payment", 2500, "EUR", @business_eur, resource: [ "TRANSFER", "7001" ])
+    credit = leg(@personal, "activity:p1", "incoming_payment", -2500, "EUR", @personal_eur, resource: [ "TRANSFER", "7001" ])
+    credit.update!(details: { "classification" => "salary" })
+
+    with_link_own_profile_transfers { process }
+
+    assert_nil Transfer.find_by(inflow_transaction: credit.reload.entry.transaction)
+    assert debit.reload.imported?
+  end
+
+  test "an operator classification as internal transfer links the legs" do
+    debit = leg(@business, "activity:b1", "outgoing_payment", 2500, "EUR", @business_eur, resource: [ "TRANSFER", "7001" ])
+    credit = leg(@personal, "activity:p1", "incoming_payment", -2500, "EUR", @personal_eur, resource: [ "TRANSFER", "7001" ])
+    credit.update!(details: { "classification" => "internal_transfer" })
+
+    process
+
+    assert Transfer.exists?(outflow_transaction: debit.reload.entry.transaction, inflow_transaction: credit.reload.entry.transaction)
+  end
+
+  test "a jar move with both legs becomes a transfer; with one leg it is still not income" do
+    jar = linked_balance(@personal, "50005", "EUR")
+    standard = leg(@personal, "activity:j1:standard", "jar_move", 200, "EUR", @personal_eur, details: { "counterpart_key" => "activity:j1:jar" })
+    into_jar = leg(@personal, "activity:j1:jar", "jar_move", -200, "EUR", jar, details: { "counterpart_key" => "activity:j1:standard" })
+    lonely = leg(@personal, "activity:j2:standard", "jar_move", -50, "EUR", @personal_eur)
+
+    process
+
+    assert Transfer.exists?(outflow_transaction: standard.reload.entry.transaction, inflow_transaction: into_jar.reload.entry.transaction)
+    assert_equal "funds_movement", lonely.reload.entry.transaction.kind
+  end
+
   private
     def linked_balance(item, balance_id, currency)
       wise_account = item.wise_accounts.create!(balance_id: balance_id, currency: currency, name: "Wise #{currency}", raw_payload: { "type" => "STANDARD" })
