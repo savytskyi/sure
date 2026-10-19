@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_19_150000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pgcrypto"
@@ -634,6 +634,88 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
     t.jsonb "locked_attributes", default: {}
     t.string "subtype"
     t.datetime "updated_at", null: false
+  end
+
+  create_table "derivative_ledger_events", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
+    t.uuid "account_id"
+    t.decimal "amount", precision: 36, scale: 18, null: false
+    t.string "asset", null: false
+    t.string "category", null: false
+    t.datetime "created_at", null: false
+    t.uuid "entry_id"
+    t.string "external_key", null: false
+    t.uuid "family_id", null: false
+    t.datetime "imported_at"
+    t.string "info"
+    t.uuid "item_id", null: false
+    t.string "item_type", null: false
+    t.string "market", null: false
+    t.datetime "occurred_at", null: false
+    t.uuid "provider_account_id"
+    t.string "provider_account_type"
+    t.string "provider_key", null: false
+    t.string "provider_trade_id"
+    t.string "provider_transaction_id"
+    t.string "provider_type", null: false
+    t.jsonb "raw_payload"
+    t.string "reason"
+    t.string "status", default: "ready", null: false
+    t.string "symbol"
+    t.datetime "updated_at", null: false
+    t.index ["account_id", "occurred_at"], name: "index_derivative_ledger_events_on_account_id_and_occurred_at"
+    t.index ["account_id"], name: "index_derivative_ledger_events_on_account_id"
+    t.index ["entry_id"], name: "index_derivative_ledger_events_on_entry_id"
+    t.index ["family_id", "status"], name: "index_derivative_ledger_events_on_family_id_and_status"
+    t.index ["family_id"], name: "index_derivative_ledger_events_on_family_id"
+    t.index ["item_type", "item_id", "external_key"], name: "index_derivative_ledger_events_on_item_and_external_key", unique: true
+    t.index ["item_type", "item_id"], name: "index_derivative_ledger_events_on_item"
+    t.index ["provider_account_type", "provider_account_id"], name: "index_derivative_ledger_events_on_provider_account"
+  end
+
+  create_table "derivative_positions", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
+    t.uuid "account_id"
+    t.decimal "break_even_price", precision: 36, scale: 18
+    t.datetime "closed_at"
+    t.decimal "contract_size", precision: 36, scale: 18
+    t.string "contract_size_currency"
+    t.string "contract_type"
+    t.datetime "created_at", null: false
+    t.decimal "entry_price", precision: 36, scale: 18
+    t.uuid "family_id", null: false
+    t.datetime "first_observed_at", null: false
+    t.decimal "isolated_margin", precision: 36, scale: 18
+    t.uuid "item_id", null: false
+    t.string "item_type", null: false
+    t.datetime "last_observed_at", null: false
+    t.decimal "leverage", precision: 12, scale: 4
+    t.decimal "liquidation_price", precision: 36, scale: 18
+    t.string "margin_asset"
+    t.string "margin_type"
+    t.decimal "mark_price", precision: 36, scale: 18
+    t.string "market", null: false
+    t.decimal "notional", precision: 36, scale: 18
+    t.string "notional_currency"
+    t.datetime "opened_at"
+    t.string "position_side", default: "BOTH", null: false
+    t.string "price_currency"
+    t.uuid "provider_account_id"
+    t.string "provider_account_type"
+    t.string "provider_key", null: false
+    t.datetime "provider_updated_at"
+    t.decimal "quantity", precision: 36, scale: 18, null: false
+    t.string "quantity_unit", null: false
+    t.jsonb "raw_payload"
+    t.string "status", default: "open", null: false
+    t.string "symbol", null: false
+    t.decimal "unrealized_pnl", precision: 36, scale: 18
+    t.string "unrealized_pnl_currency"
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_derivative_positions_on_account_id"
+    t.index ["family_id", "status"], name: "index_derivative_positions_on_family_id_and_status"
+    t.index ["family_id"], name: "index_derivative_positions_on_family_id"
+    t.index ["item_type", "item_id", "market", "symbol", "position_side"], name: "index_derivative_positions_one_open_per_side", unique: true, where: "((status)::text = 'open'::text)"
+    t.index ["item_type", "item_id"], name: "index_derivative_positions_on_item"
+    t.index ["provider_account_type", "provider_account_id"], name: "index_derivative_positions_on_provider_account"
   end
 
   create_table "enable_banking_accounts", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
@@ -3043,6 +3125,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
   add_foreign_key "debug_log_entries", "accounts", on_delete: :nullify
   add_foreign_key "debug_log_entries", "families", on_delete: :nullify
   add_foreign_key "debug_log_entries", "users", on_delete: :nullify
+  add_foreign_key "derivative_ledger_events", "accounts", on_delete: :nullify
+  add_foreign_key "derivative_ledger_events", "entries", on_delete: :nullify
+  add_foreign_key "derivative_ledger_events", "families", on_delete: :cascade
+  add_foreign_key "derivative_positions", "accounts", on_delete: :nullify
+  add_foreign_key "derivative_positions", "families", on_delete: :cascade
   add_foreign_key "enable_banking_accounts", "enable_banking_items"
   add_foreign_key "enable_banking_items", "families"
   add_foreign_key "entries", "account_statements", column: "reconciled_by_statement_id", on_delete: :nullify
