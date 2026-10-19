@@ -1,0 +1,269 @@
+# Release validation for this fork's custom builds (see docs/custom-wise-integration.md).
+#
+# Reuses the upstream CI workflow (Brakeman, Rubocop, Biome, full Rails test
+# suite, system tests) unchanged and adds only what a fork deployment needs:
+#
+# - migrations: loads the schema of the release production runs, applies
+#   every newer migration, checks the result against db/schema.rb, checks
+#   that this fork's migration reverses cleanly, and boots the previous
+#   release's code against the migrated database (rollback compatibility)
+# - wise: the Wise and provider-ledger tests on their own, for a fast signal
+# - image: builds the production image for linux/amd64 and smoke-tests it;
+#   publishes it only on a manual run with `publish: true`
+#
+# Runs on GitHub-hosted runners only. Uses no Wise, Sure or other credentials;
+# publishing uses the workflow's own GITHUB_TOKEN.
+name: Fork release
+
+on:
+  push:
+    branches:
+      - "feature/**"
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: "Upstream release production currently runs (migration baseline)"
+        required: false
+        type: string
+        default: "v0.7.5-hotfix.2"
+      publish:
+        description: "Push the image to ghcr.io, tagged with the commit SHA"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BASELINE_REF: ${{ inputs.baseline_ref || 'v0.7.5-hotfix.2' }}
+  UPSTREAM_REPOSITORY: https://github.com/we-promise/sure.git
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  wise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PLAID_CLIENT_ID: foo
+      PLAID_SECRET: bar
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432 # pipelock:ignore
+      REDIS_URL: redis://localhost:6379
+      RAILS_ENV: test
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: --health-cmd="pg_isready" --health-interval=10s --health-timeout=5s --health-retries=3
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: --health-cmd="redis-cli ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    steps:
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips postgresql-client libpq-dev
+
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@97ecb7b512899eb71ab1bf2310a624c6f1589ac6 # v1.308.0
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Prepare database
+        run: bin/rails db:create db:schema:load
+
+      - name: Wise and provider-ledger tests
+        run: |
+          bin/rails test test/models/wise* test/models/wise*/ test/models/provider/wise_test.rb \
+            test/models/provider/wise_adapter_test.rb test/models/provider_ledger_record test/models/merchant \
+            test/models/transfer/provider_linker_test.rb test/controllers/wise_items_controller_test.rb \
+            test/controllers/wise_sca_localization_test.rb
+
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PLAID_CLIENT_ID: foo
+      PLAID_SECRET: bar
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432 # pipelock:ignore
+      REDIS_URL: redis://localhost:6379
+      RAILS_ENV: test
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres # pipelock:ignore
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: --health-cmd="pg_isready" --health-interval=10s --health-timeout=5s --health-retries=3
+      redis:
+        image: redis
+        ports:
+          - 6379:6379
+        options: --health-cmd="redis-cli ping" --health-interval=10s --health-timeout=5s --health-retries=3
+    steps:
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvips postgresql-client libpq-dev
+
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch the production baseline release
+        run: |
+          git fetch --no-tags "$UPSTREAM_REPOSITORY" "refs/tags/${BASELINE_REF}:refs/tags/${BASELINE_REF}"
+          git worktree add baseline "$BASELINE_REF"
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@97ecb7b512899eb71ab1bf2310a624c6f1589ac6 # v1.308.0
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Load the baseline schema, then migrate to this commit
+        run: |
+          git show "${BASELINE_REF}:db/schema.rb" > "$RUNNER_TEMP/baseline_schema.rb"
+          bin/rails db:create
+          SCHEMA="$RUNNER_TEMP/baseline_schema.rb" bin/rails db:schema:load
+          # schema:load marks every migration file dated before the baseline
+          # schema version as applied, but three upstream migrations are
+          # back-dated before it and never ran in production. Record exactly
+          # the baseline release's migrations, as production has them.
+          git ls-tree --name-only "$BASELINE_REF" db/migrate/ | sed -E 's|^db/migrate/([0-9]+)_.*|\1|' > "$RUNNER_TEMP/baseline_versions"
+          db=$(bin/rails runner 'print ActiveRecord::Base.connection.current_database')
+          versions=$(sed "s/.*/'&'/" "$RUNNER_TEMP/baseline_versions" | paste -sd, -)
+          psql -d "$db" -c "DELETE FROM schema_migrations WHERE version NOT IN (${versions})"
+          echo "Pending migrations from ${BASELINE_REF}:"
+          bin/rails db:migrate:status | grep '^\s*down' || true
+          bin/rails db:migrate
+
+      - name: Compare the migrated database with db/schema.rb
+        run: |
+          psql -d postgres -c "CREATE DATABASE schema_reference"
+          DATABASE_URL="${DATABASE_URL}/schema_reference" bin/rails db:schema:load
+          describe() {
+            psql -d "$1" -At <<'SQL'
+          SELECT 'column ' || table_name || '.' || column_name || ' ' || data_type || ' null=' || is_nullable || ' default=' || coalesce(column_default, '')
+            FROM information_schema.columns WHERE table_schema = 'public'
+          UNION ALL
+          SELECT 'index ' || indexdef FROM pg_indexes WHERE schemaname = 'public'
+          UNION ALL
+          SELECT 'constraint ' || conrelid::regclass || ' ' || conname || ' ' || pg_get_constraintdef(oid)
+            FROM pg_constraint WHERE connamespace = 'public'::regnamespace
+          ORDER BY 1;
+          SQL
+          }
+          migrated_db=$(bin/rails runner 'print ActiveRecord::Base.connection.current_database')
+          # Postgres prints an IN-list CHECK differently depending on how it
+          # was created (ARRAY[...]::text[] vs ARRAY[(...)::text]); casts and
+          # parentheses are normalized away before comparing.
+          normalize() { sed -E 's/::(text|character varying)(\[\])?//g; s/[()]//g'; }
+          describe "$migrated_db" | normalize > "$RUNNER_TEMP/migrated.txt"
+          describe schema_reference | normalize > "$RUNNER_TEMP/reference.txt"
+          diff -u "$RUNNER_TEMP/reference.txt" "$RUNNER_TEMP/migrated.txt"
+
+      - name: This fork's migration reverses and reapplies cleanly
+        run: |
+          bin/rails db:migrate:down VERSION=20261019120000
+          bin/rails db:migrate
+
+      - name: The baseline release boots against the migrated database
+        working-directory: baseline
+        env:
+          BUNDLE_GEMFILE: ${{ github.workspace }}/baseline/Gemfile
+        run: |
+          bundle install --jobs 4
+          bin/rails runner '
+            Rails.application.eager_load!
+            failures = ApplicationRecord.descendants.reject(&:abstract_class?).filter_map do |model|
+              next if model.table_name.blank? || !model.table_exists?
+              model.reset_column_information
+              model.limit(1).to_a
+              nil
+            rescue => e
+              "#{model.name}: #{e.class}: #{e.message.lines.first}"
+            end
+            puts failures
+            abort "#{failures.size} models fail against the migrated schema" if failures.any?
+            puts "#{ApplicationRecord.descendants.size} models load against the migrated schema"
+          '
+
+  image:
+    needs: [ ci, wise, migrations ]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Lowercase image name
+        run: echo "IMAGE=${IMAGE,,}" >> "$GITHUB_ENV"
+
+      - name: Build linux/amd64 image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: BUILD_COMMIT_SHA=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=custom-${{ github.sha }}
+            org.opencontainers.image.title=Sure (custom)
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          provenance: false
+          load: true
+          push: false
+
+      - name: Smoke-test the image
+        run: |
+          docker run --rm -e SECRET_KEY_BASE=ci-smoke-only -e SELF_HOSTED=true "$IMAGE:${GITHUB_SHA}" \
+            ./bin/rails runner 'puts "Sure #{Rails.env} boots; build #{ENV["BUILD_COMMIT_SHA"]}"; abort unless defined?(ProviderLedgerRecord)'
+          docker image inspect "$IMAGE:${GITHUB_SHA}" --format 'size={{.Size}} arch={{.Architecture}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the SHA-tagged image
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        run: |
+          docker push "$IMAGE:${GITHUB_SHA}"
+          digest=$(docker image inspect "$IMAGE:${GITHUB_SHA}" --format '{{index .RepoDigests 0}}')
+          echo "Published ${digest}" | tee -a "$GITHUB_STEP_SUMMARY"
