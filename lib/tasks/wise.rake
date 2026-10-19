@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
 # Operator tools for the reconstructed Wise ledger. `coverage`, `review`,
-# `reconcile`, `closed_balances` and `legacy_entries` only read. `dismiss`,
+# `reconcile`, `closed_balances` and `legacy_report` only read;
+# `legacy_exclude` is a dry run unless CONFIRM=yes. `dismiss`,
 # `resolve`, `accept_duplicate` and `classify` record a decision on one leg,
 # which every later sync keeps.
 namespace :wise do
@@ -94,11 +95,32 @@ namespace :wise do
     end
   end
 
-  desc "Wise entries from the old transfer fallback and conversion routing that no reconstructed leg claimed"
-  task legacy_entries: :environment do
-    Entry.where(source: "wise").where("external_id LIKE 'wise_transfer_%' OR external_id LIKE 'wise_fee_%' OR external_id LIKE 'wise_interbalance_%_outflow'")
-      .includes(:account).order(:date).find_each do |entry|
-      puts [ entry.id, entry.date, entry.account.name, entry.external_id, entry.amount.to_s("F"), entry.currency, entry.name ].join(" | ")
+  desc "Review entries the old Wise connector created (FAMILY_ID=..., OUT=report.csv); changes nothing"
+  task legacy_report: :environment do
+    families = ENV["FAMILY_ID"].present? ? Family.where(id: ENV["FAMILY_ID"]) : Family.where(id: WiseItem.select(:family_id))
+    families.find_each do |family|
+      report = WiseItem::LegacyReport.new(family)
+      puts "#{family.name}: #{report.findings.size} legacy Wise entries"
+      report.summary.each { |finding, count| puts format("  %-40s %-8s %6d", finding, WiseItem::LegacyReport::ACTIONS[finding], count) }
+      next if ENV["OUT"].blank?
+
+      path = families.many? ? ENV["OUT"].sub(/(\.csv)?\z/, "-#{family.id}.csv") : ENV["OUT"]
+      File.write(path, report.to_csv)
+      puts "  report written to #{path}"
     end
+  end
+
+  desc "Exclude legacy Wise entries proposed for exclusion (FAMILY_ID=... CONFIRM=yes [FINDINGS=a,b]); reversible, deletes nothing"
+  task legacy_exclude: :environment do
+    family = Family.find(ENV.fetch("FAMILY_ID"))
+    report = WiseItem::LegacyReport.new(family)
+    findings = ENV["FINDINGS"].present? ? ENV["FINDINGS"].split(",") : report.findings.select { |f| f.action == "exclude" }.map(&:finding).uniq
+    targets = report.findings.select { |f| f.action == "exclude" && findings.include?(f.finding) }
+    puts "#{targets.size} entries to exclude: #{targets.map(&:finding).tally}"
+    abort "Dry run. Re-run with CONFIRM=yes to exclude them (Sure keeps them; include them again from the transaction page)." unless ENV["CONFIRM"] == "yes"
+
+    targets.each { |f| f.entry.update!(excluded: true) }
+    targets.map { |f| f.entry.account }.uniq.each(&:sync_later)
+    puts "Excluded #{targets.size} entries."
   end
 end
