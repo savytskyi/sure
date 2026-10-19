@@ -111,6 +111,36 @@ class Provider::WiseTest < ActiveSupport::TestCase
     assert_equal [], result
   end
 
+  test "pages the activity feed with nextCursor within a time window" do
+    since = Time.utc(2024, 1, 1)
+    until_time = Time.utc(2024, 2, 1, 12, 30)
+
+    Provider::Wise.expects(:get)
+      .with { |url, options|
+        url == "https://api.wise.com/v1/profiles/111/activities" &&
+          options[:query] == { size: 100, nextCursor: "abc", since: "2024-01-01T00:00:00.000Z", until: "2024-02-01T12:30:00.000Z" }
+      }
+      .returns(fake_response(code: 200, body: '{"activities":[],"cursor":null}'))
+
+    @provider.get_activities("111", cursor: "abc", since: since, until_time: until_time)
+  end
+
+  test "reads quotes and recipient accounts with GET only" do
+    Provider::Wise.expects(:get).with { |url, _| url == "https://api.wise.com/v3/profiles/111/quotes/q-1" }.returns(fake_response(code: 200, body: '{"payInId":1}'))
+    Provider::Wise.expects(:get).with { |url, _| url == "https://api.wise.com/v2/accounts/42" }.returns(fake_response(code: 200, body: '{"id":42}'))
+    Provider::Wise.expects(:post).never
+
+    assert_equal({ "payInId" => 1 }, @provider.get_quote("111", "q-1"))
+    assert_equal({ "id" => 42 }, @provider.get_recipient_account(42))
+  end
+
+  test "never puts the token in an error message" do
+    Provider::Wise.expects(:get).returns(fake_response(code: 500, body: "boom"))
+
+    error = assert_raises(Provider::Wise::WiseError) { @provider.get_transfers("111") }
+    assert_not_includes error.message, "test_token"
+  end
+
   private
 
     FakeResponse = Struct.new(:code, :body, :headers)

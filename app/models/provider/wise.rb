@@ -77,21 +77,38 @@ class Provider::Wise
     transactions
   end
 
-  def get_transfers(profile_id, limit: 100, offset: 0)
-    get(
-      "/v1/transfers",
-      query: { profile: profile_id, limit: limit, offset: offset }
-    )
+  def get_transfers(profile_id, limit: 100, offset: 0, created_from: nil, created_to: nil)
+    query = { profile: profile_id, limit: limit, offset: offset }
+    query[:createdDateStart] = wise_time(created_from) if created_from
+    query[:createdDateEnd] = wise_time(created_to) if created_to
+    get("/v1/transfers", query: query)
   end
 
   def get_transfer(transfer_id)
     get("/v1/transfers/#{transfer_id}")
   end
 
-  def get_activities(profile_id, cursor: nil, size: 100)
+  # Wise pages the activity feed with `nextCursor` (the response's `cursor`)
+  # and filters it by creation time with `since`/`until`.
+  def get_activities(profile_id, cursor: nil, size: 100, since: nil, until_time: nil)
     query = { size: size }
-    query[:cursor] = cursor if cursor
+    query[:nextCursor] = cursor if cursor
+    query[:since] = wise_time(since) if since
+    query[:until] = wise_time(until_time) if until_time
     get("/v1/profiles/#{profile_id}/activities", query: query)
+  end
+
+  # The quote a transfer was created from: the fee per pay-in method and
+  # `payInId`, the balance that funded the transfer. Documented as user-token
+  # only, but it answers personal tokens.
+  def get_quote(profile_id, quote_id)
+    get("/v3/profiles/#{profile_id}/quotes/#{quote_id}")
+  end
+
+  # A recipient account: name, `ownedByCustomer`, and for Wise balance
+  # recipients `details.targetProfile` / `details.balanceId`.
+  def get_recipient_account(account_id)
+    get("/v2/accounts/#{account_id}")
   end
 
   def get_borderless_accounts(profile_id)
@@ -100,6 +117,11 @@ class Provider::Wise
 
   private
 
+    def wise_time(value)
+      value.to_time.utc.iso8601(3)
+    end
+
+    # Read-only by construction: this is the only request method.
     def get(path, query: {}, sca_headers: {})
       response = self.class.get(
         "#{base_url}#{path}",
