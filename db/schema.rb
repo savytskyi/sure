@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_10_15_090000) do
+ActiveRecord::Schema[8.1].define(version: 2026_10_19_120000) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
   enable_extension "pgcrypto"
@@ -1962,6 +1962,51 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_15_090000) do
     t.check_constraint "avm_provider IS NULL OR (avm_provider::text = ANY (ARRAY['rentcast'::character varying, 'realie'::character varying, 'chimnie'::character varying]::text[]))", name: "properties_avm_provider_check"
   end
 
+  create_table "provider_ledger_records", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
+    t.uuid "account_id"
+    t.decimal "amount", precision: 19, scale: 4
+    t.string "category", null: false
+    t.string "counterparty_name"
+    t.datetime "created_at", null: false
+    t.string "currency"
+    t.jsonb "details", default: {}, null: false
+    t.uuid "entry_id"
+    t.string "external_key", null: false
+    t.uuid "family_id", null: false
+    t.decimal "fee_amount", precision: 19, scale: 4
+    t.string "fee_currency"
+    t.jsonb "field_provenance", default: {}, null: false
+    t.datetime "imported_at"
+    t.uuid "item_id", null: false
+    t.string "item_type", null: false
+    t.string "merchant_name"
+    t.string "name"
+    t.datetime "occurred_at"
+    t.decimal "original_amount", precision: 19, scale: 4
+    t.string "original_currency"
+    t.string "payment_reference"
+    t.string "provenance", null: false
+    t.uuid "provider_account_id"
+    t.string "provider_account_type"
+    t.string "provider_key", null: false
+    t.string "provider_resource_id"
+    t.string "provider_resource_type"
+    t.string "provider_transfer_id"
+    t.jsonb "raw_payload"
+    t.string "reason"
+    t.jsonb "relationship", default: {}, null: false
+    t.string "status", default: "ready", null: false
+    t.datetime "updated_at", null: false
+    t.index ["account_id"], name: "index_provider_ledger_records_on_account_id"
+    t.index ["entry_id"], name: "index_provider_ledger_records_on_entry_id"
+    t.index ["family_id", "provider_key", "provider_transfer_id"], name: "index_provider_ledger_records_on_transfer"
+    t.index ["family_id", "status"], name: "index_provider_ledger_records_on_family_id_and_status"
+    t.index ["family_id"], name: "index_provider_ledger_records_on_family_id"
+    t.index ["item_type", "item_id", "external_key"], name: "index_provider_ledger_records_on_item_and_external_key", unique: true
+    t.index ["item_type", "item_id"], name: "index_provider_ledger_records_on_item"
+    t.index ["provider_account_type", "provider_account_id"], name: "index_provider_ledger_records_on_provider_account"
+  end
+
   create_table "provider_request_counts", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
     t.integer "count", default: 0, null: false
     t.datetime "created_at", null: false
@@ -2915,13 +2960,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_15_090000) do
 
   create_table "wise_accounts", id: :uuid, default: -> { "gen_random_uuid()" }, force: :cascade do |t|
     t.string "balance_id", null: false
+    t.datetime "closed_at"
     t.datetime "created_at", null: false
     t.string "currency", null: false
     t.decimal "current_balance", precision: 19, scale: 4
+    t.datetime "first_observed_at"
+    t.datetime "last_observed_at"
     t.string "name"
+    t.datetime "opened_at"
     t.jsonb "raw_payload"
     t.jsonb "raw_transactions_payload"
     t.decimal "reserved_balance", precision: 19, scale: 4
+    t.string "status", default: "active", null: false
     t.datetime "updated_at", null: false
     t.uuid "wise_item_id", null: false
     t.index ["wise_item_id", "balance_id"], name: "index_wise_accounts_on_wise_item_id_and_balance_id", unique: true
@@ -2940,6 +2990,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_15_090000) do
     t.text "sca_private_key"
     t.boolean "scheduled_for_deletion", default: false, null: false
     t.string "status", default: "good", null: false
+    t.jsonb "sync_checkpoints", default: {}, null: false
     t.datetime "sync_start_date"
     t.text "token", null: false
     t.datetime "updated_at", null: false
@@ -3073,6 +3124,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_10_15_090000) do
   add_foreign_key "plaid_accounts", "plaid_items"
   add_foreign_key "plaid_items", "families"
   add_foreign_key "plaid_items", "users", column: "owner_id", on_delete: :nullify
+  add_foreign_key "provider_ledger_records", "accounts", on_delete: :nullify
+  add_foreign_key "provider_ledger_records", "entries", on_delete: :nullify
+  add_foreign_key "provider_ledger_records", "families", on_delete: :cascade
   add_foreign_key "push_subscriptions", "users"
   add_foreign_key "questrade_accounts", "questrade_items"
   add_foreign_key "questrade_items", "families"
