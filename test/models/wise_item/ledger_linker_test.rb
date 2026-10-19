@@ -121,6 +121,16 @@ class WiseItem::LedgerLinkerTest < ActiveSupport::TestCase
     assert_equal "funds_movement", lonely.reload.entry.transaction.kind
   end
 
+  test "a deposit the receiving profile created itself stays an ordinary incoming payment" do
+    leg(@personal, "transfer:9001", "transfer_order", 500, "EUR", nil, status: :excluded, resource: [ "TRANSFER", "9001" ])
+    credit = leg(@personal, "activity:d1", "incoming_payment", -500, "EUR", @personal_eur, resource: [ "TRANSFER", "9001" ])
+
+    process
+
+    assert_equal "self_initiated_deposit", credit.reload.relationship["type"]
+    assert_equal "standard", credit.entry.transaction.kind
+  end
+
   private
     def linked_balance(item, balance_id, currency)
       wise_account = item.wise_accounts.create!(balance_id: balance_id, currency: currency, name: "Wise #{currency}", raw_payload: { "type" => "STANDARD" })

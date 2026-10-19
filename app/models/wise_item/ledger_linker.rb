@@ -39,6 +39,10 @@ class WiseItem::LedgerLinker
 
     legs.each do |record|
       relationship = relationships[record.id] || {}
+      # The Sure transfer outcome (set by link_transfers!) belongs to the same pair.
+      if relationship["counterpart_id"].present? && relationship["counterpart_id"] == record.relationship["counterpart_id"]
+        relationship = relationship.merge(record.relationship.slice("sure_transfer"))
+      end
       record.update_columns(relationship: relationship, updated_at: Time.current) if record.relationship != relationship
     end
   end
@@ -140,10 +144,19 @@ class WiseItem::LedgerLinker
             "batch_key" => order.relationship["batch_key"], "transfer_id" => transfer_id,
             "basis" => "credit carries the Wise transfer id of an own batch member; the batch debit stays one leg"
           }
+        elsif order && order.item_id == credit.item_id
+          # The profile created this transfer to its own balance (a pay-in
+          # such as "add money by bank transfer"). Wise does not say who paid
+          # it in, so it is neither assumed to be own money nor income: it
+          # stays an ordinary incoming payment, marked for context only.
+          relationships[credit.id] = {
+            "type" => "self_initiated_deposit", "status" => "unmatched", "transfer_id" => transfer_id,
+            "basis" => "transfer created by the receiving profile itself; the payer is not stated"
+          }
         elsif order
           relationships[credit.id] = {
             "type" => relation_type(order, credit), "status" => "unmatched", "transfer_id" => transfer_id,
-            "basis" => "sent by an own profile; its debit leg was not found"
+            "basis" => "sent by another own profile; its debit leg was not found"
           }
         end
       end
