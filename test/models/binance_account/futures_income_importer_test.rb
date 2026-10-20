@@ -163,12 +163,12 @@ class BinanceAccount::FuturesIncomeImporterTest < ActiveSupport::TestCase
     import(limited)
 
     soon = FakeProvider.new { [] }
-    stats = import(soon, now: Time.current + 30.seconds)
+    stats = import(soon, now: @now + 30.seconds)
     assert_empty soon.calls, "asked again within Retry-After"
     assert_equal "waiting_for_rate_limit", stats["usds_m"][:stopped]
 
     later = FakeProvider.new { [] }
-    import(later, now: Time.current + 3.minutes)
+    import(later, now: @now + 3.minutes)
     assert later.calls.any?
     assert_nil checkpoint("usds_m")["retry_after"]
   end

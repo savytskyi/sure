@@ -79,6 +79,9 @@ class BinanceAccount::FuturesIncomeImporter
 
   # @return [Hash] market -> { created:, requests:, complete:, stopped: }
   def import(now: Time.current)
+    # Checkpoints are stamped with the run's clock, the one a later run
+    # compares a rate-limit pause against.
+    @run_at = now
     active_markets.to_h { |market| [ market, import_market(market, now) ] }
   end
 
@@ -241,7 +244,7 @@ class BinanceAccount::FuturesIncomeImporter
 
     def save_checkpoint(market, **values)
       # Replaced, not deep-merged, so a cleared error or stop reason goes away.
-      entry = (checkpoints[market] || {}).merge(values.transform_keys(&:to_s)).merge("run_at" => Time.current.iso8601).compact
+      entry = (checkpoints[market] || {}).merge(values.transform_keys(&:to_s)).merge("run_at" => (@run_at || Time.current).iso8601).compact
       extra = binance_account.extra.to_h.deep_dup
       extra["binance"] = (extra["binance"] || {}).merge("futures_income" => checkpoints.merge(market => entry))
       binance_account.update!(extra: extra)
