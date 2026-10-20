@@ -167,31 +167,27 @@ PostgreSQL 17.11 on a private port on the Mac — not the Docker daemon:
 
 ### Backup job
 
-`~/Library/LaunchAgents/com.ky.sure-backup.plist` runs `backup-sure.sh` with
-launchd's minimal `PATH`, which does not contain `docker`
-(`/usr/local/bin`), so the scheduled run fails and the last automatic
-backup is 2026-10-18 11:08. Fix (not applied): add
-`export PATH="/usr/local/bin:$HOME/.docker/bin:$PATH"` near the top of the
-script, or an `EnvironmentVariables` → `PATH` key in the plist, then
-`launchctl kickstart -k gui/$(id -u)/com.ky.sure-backup` and check
-`~/homelab/sure-backup.log`.
+`~/Library/LaunchAgents/com.ky.sure-backup.plist` runs `~/homelab/backup-sure.sh`
+daily at 03:30 (absolute Docker CLI path, so launchd's minimal `PATH` is
+enough). Each backup holds the database dump, the uploads and an
+**age-encrypted** configuration archive (`.env` with the Active Record keys
+never reaches the backup disk in plaintext). Key locations and restore
+commands: `~/homelab/SURE_CUSTOM_DEPLOYMENT.md`.
 
-## Deployment (not yet performed)
+## Deployment
 
-1. **Back up**: `~/homelab/backup-sure.sh`. Note the backup directory.
-2. **Verify the backup restores**: steps 2–3 of the procedure above on the
-   new dump (`pg_restore --list` alone only checks the archive).
-3. **Stop Sure**: `docker compose -f ~/homelab/compose.yml stop sure-worker sure-web`.
-4. **Pin the image**: `~/homelab/compose.yml` stays unchanged. Write
-   `~/homelab/deployments/sure/current.env` (`SURE_IMAGE=ghcr.io/savytskyi/sure:<sha>@sha256:<digest>`,
-   `SURE_GIT_SHA=<sha>`) and run every command below with
-   `--env-file .env --env-file deployments/sure/current.env -f compose.yml -f compose.sure-custom.override.yml`,
-   which gives both `sure-web` and `sure-worker` that one digest (see
-   `~/homelab/SURE_CUSTOM_DEPLOYMENT.md`). Pull before stopping Sure.
-5. **Migrate**: `docker compose run --rm sure-web ./bin/rails db:migrate`
-   (the web entrypoint would also run `db:prepare` on start; running it
-   explicitly shows the output and stops on error).
-6. **Start**: `docker compose up -d sure-web`, then `sure-worker`.
+Deployed to the homelab on 2026-10-20 (commit `9da7fa65`). Steps 1–6 are
+`~/homelab/deploy-sure.sh <image@sha256:digest> <sha> [--apply]` (preflight
+without `--apply`), which pins the digest in `~/homelab/compose.yml` for both
+services; see `~/homelab/SURE_CUSTOM_DEPLOYMENT.md`.
+
+1. **Back up**: the script takes a quiesced backup after stopping Sure.
+2. **Verify the backup restores** when migrations are pending: restore the
+   dump into an isolated database first (procedure above).
+3. **Stop Sure**: worker first, then web.
+4. **Pin the image**: the two `image:` lines in `compose.yml`, nothing else.
+5. **Migrate**: one `./bin/rails db:migrate` with the new image.
+6. **Start**: web, wait for `/up`, then the worker.
 7. **Health**: `docker compose ps` (both healthy), `curl -fsS http://127.0.0.1:3030/up`,
    `docker logs --since 5m sure-web | grep -i -E "error|fatal"`,
    `docker exec sure-web bin/rails runner 'puts Account.count, Entry.count, Account.sum(:balance)'`
