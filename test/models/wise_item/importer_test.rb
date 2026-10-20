@@ -584,6 +584,38 @@ class WiseItem::ImporterTest < ActiveSupport::TestCase
     assert_equal 2, resumed.calls.count(:get_quote), "only the quotes still missing are requested"
   end
 
+  test "a batch imported as one debit is replaced by its members once they come to light" do
+    eur, = link_standard_balances
+    at = 5.days.ago.utc.change(usec: 0)
+    batch = { "id" => "batch-9", "type" => "BATCH_TRANSFER", "status" => "COMPLETED", "resource" => { "type" => "BATCH_TRANSFER", "id" => "b-9" },
+              "title" => "<strong>salaries</strong>", "primaryAmount" => "300 EUR", "secondaryAmount" => "301 EUR", "createdOn" => at.iso8601 }
+    sync_with(activities: [ batch ])
+    batch_entry = eur.entries.find_by(external_id: "wise_activity_batch-9")
+    assert_equal BigDecimal("300"), batch_entry.amount
+    batch_fee = @wise_item.ledger_records.find_by(external_key: "activity:batch-9").fee_entry
+
+    legacy = eur.entries.create!(name: "Wise", date: at.to_date, amount: 100, currency: "EUR", external_id: "wise_transfer_7401",
+                                 source: "wise", excluded: true, entryable: Transaction.new)
+    transfers = [ [ 7401, 100 ], [ 7402, 200 ] ].map do |id, value|
+      build_transfer(id: id).merge("sourceValue" => value, "targetValue" => value, "quoteUuid" => "q-#{id}",
+                                   "reference" => "Salary #{id}", "created" => at.strftime("%Y-%m-%d %H:%M:%S"))
+    end
+    quotes = [ 7401, 7402 ].to_h do |id|
+      [ "q-#{id}", { "payInId" => 10000001, "payInMethod" => "BALANCE", "payOut" => "BANK_TRANSFER",
+                    "paymentOptions" => [ { "payIn" => "BALANCE", "payOut" => "BANK_TRANSFER", "fee" => { "total" => 0.5 } } ] } ]
+    end
+    2.times { sync_with(activities: [ batch ], transfers: transfers, quotes: quotes) }
+
+    assert batch_entry.reload.excluded?
+    assert batch_fee.reload.excluded?
+    assert @wise_item.ledger_records.find_by(external_key: "activity:batch-9").withdrawn?
+    members = eur.entries.where(source: "wise", excluded: false, entryable_type: "Transaction")
+    assert_equal [ BigDecimal("0.5"), BigDecimal("0.5"), BigDecimal("100"), BigDecimal("200") ], members.map(&:amount).sort
+    assert_equal BigDecimal("301"), members.sum(:amount)
+    assert legacy.reload.excluded?, "a legacy member entry excluded as a double count is not revived"
+    assert_equal "unpacked", @wise_item.ledger_records.find_by(external_key: "transfer:7401").relationship["status"]
+  end
+
   test "an operator resolution survives the next sync" do
     link_standard_balances
     split = card_activity("3006", "<strong>Hotel</strong>", "300 CHF").merge("secondaryAmount" => "EUR, USD")

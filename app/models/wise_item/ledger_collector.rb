@@ -42,6 +42,7 @@ class WiseItem::LedgerCollector
 
     legs = reconstructor(activities).legs(activities)
     legs.each { |leg| upsert_leg(leg) }
+    retire_replaced_batch_legs(legs)
     mark_batch_members(legs)
 
     Result.new(complete: transfers_complete && details_complete, legs: legs.size, errors: @errors)
@@ -348,20 +349,55 @@ class WiseItem::LedgerCollector
     end
 
     def mark_batch_members(legs)
-      legs.select { |leg| leg.category == "batch_payment" }.each do |leg|
-        ids = Array(leg.details&.dig("member_transfer_ids"))
-        next if ids.empty?
-
-        status = leg.details["members_match_total"] ? "high_confidence" : "ambiguous"
-        records.where(category: "transfer_order", provider_transfer_id: ids).find_each do |member|
-          member.update!(relationship: {
+      legs.each do |leg|
+        if leg.category == "batch_payment"
+          ids = Array(leg.details&.dig("member_transfer_ids"))
+          status = leg.details["members_match_total"] ? "high_confidence" : "ambiguous"
+          relationship = {
             "type" => "batch_member",
             "status" => status,
             "batch_key" => leg.key,
             "basis" => "created within 15 minutes of the batch#{status == 'high_confidence' ? '; member amounts sum to the batch total' : ''}"
-          })
+          }
+        elsif leg.details&.dig("batch_key") && leg.transfer_id
+          ids = [ leg.transfer_id ]
+          relationship = {
+            "type" => "batch_member",
+            "status" => "unpacked",
+            "batch_key" => leg.details["batch_key"],
+            "leg_key" => leg.key,
+            "basis" => "created within 15 minutes of the batch; booked as its own payment"
+          }
+        else
+          next
+        end
+        next if ids.empty?
+
+        records.where(category: "transfer_order", provider_transfer_id: ids).find_each do |member|
+          member.update!(relationship: relationship)
         end
       end
+    end
+
+    # A batch is either one debit or one leg per member. When a sync changes
+    # which (members came to light, or no longer add up), the legs the batch
+    # no longer produces are withdrawn, so it is never counted twice.
+    def retire_replaced_batch_legs(legs)
+      legs.select { |leg| leg.details&.dig("activity_type") == "BATCH_TRANSFER" }
+        .group_by { |leg| leg.raw["id"].to_s }
+        .each do |activity_id, current|
+          key = "activity:#{activity_id}"
+          records.where("external_key = ? OR external_key LIKE ?", key, "#{ActiveRecord::Base.sanitize_sql_like(key)}:%")
+            .where.not(external_key: current.map(&:key))
+            .where.not(status: %i[withdrawn dismissed excluded])
+            .find_each do |record|
+              if record.imported?
+                ledger_importer(record).withdraw!("batch_breakdown_changed")
+              else
+                record.update!(status: :excluded, reason: "batch_breakdown_changed")
+              end
+            end
+        end
     end
 
     def parse_time(raw)

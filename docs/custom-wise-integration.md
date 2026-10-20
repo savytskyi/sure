@@ -69,7 +69,7 @@ provenance and field-level provenance (`amount`, `currency`,
 | Provenance | Meaning | Imported? |
 |---|---|---|
 | `provider_explicit` | Wise states the balance impact **and** the balance (quote `payInId`, recipient `balanceId`) | yes |
-| `inferred` | amounts stated; balance = the single STANDARD balance of that currency that existed at the time, or a batch total summed from members | yes |
+| `inferred` | amounts stated; balance = the single STANDARD balance of that currency that existed at the time, or a batch member fee or per-currency total from member quotes | yes |
 | `unresolved` | missing or contradictory data | **no**, `needs_review` |
 
 The overall provenance is never stronger than its weakest essential field.
@@ -111,10 +111,19 @@ entry; never recreated).
 * **Conversions**: one activity → source and target legs with the stated
   amounts, linked as a confirmed Sure transfer (`funds_movement`, so neither
   income nor expense). The effective rate is recorded; no fee is invented.
-* **Batch payments**: the batch activity is the single debit. Member
-  transfers (matched by creation time ±15 min; Wise exposes no batch id) are
-  reference records and never ledger legs. A refunded member makes the batch
-  unresolved. Multi-currency batches get one inferred leg per currency.
+* **Batch payments**: member transfers are matched to the batch by creation
+  time (±15 min; Wise exposes no batch id). When they account for the batch
+  (their source values sum to the amount Wise shows, all in its currency),
+  each member is its own outgoing payment (`activity:<id>:transfer:<transfer
+  id>`) with its recipient, reference, quote fee and funding balance, and the
+  batch total is not booked. A batch fee the member quotes do not explain is
+  one `batch_fee` leg. A multi-currency batch is booked per member when every
+  member quote states its fee. A refunded member is held for review; the
+  others import. When the members do not add up, the batch stays one debit
+  (`batch_payment`) and the members stay reference records. If a later sync
+  changes which applies, the legs the batch no longer produces are withdrawn
+  (`batch_breakdown_changed`), so a batch is counted once. An unpacked member
+  adopts its legacy `wise_transfer_<id>` entry unless that entry was excluded.
 * **Own-profile payments**: the same Wise transfer id debited in one own
   profile and credited in another is `business_to_personal` /
   `personal_to_business` (confirmed), including salary paid from batch
@@ -308,7 +317,7 @@ old entries 766 were adopted, and the report proposes excluding 1,017:
 
 | Finding | Live count | Proposed |
 |---|---|---|
-| `batch_member_counted_in_batch_debit` | 696 | exclude (the batch debit is the movement) |
+| `batch_member_counted_in_batch_debit` | 696 | exclude (the batch debit is the movement; batches whose members are booked one by one no longer produce it) |
 | `duplicate_of_reconstructed_leg` | 157 | exclude |
 | `cancelled_transfer` (never funded) | 151 | exclude |
 | `refunded_transfer` | 8 | exclude |

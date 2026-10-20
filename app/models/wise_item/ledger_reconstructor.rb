@@ -13,7 +13,7 @@
 #   recipient balanceId).
 # - inferred: amounts stated, but the balance is the single STANDARD balance
 #   of that currency that existed at the time (WiseItem::BalanceRegistry), or
-#   a batch total was summed from its member transfers.
+#   a batch member fee or per-currency batch total comes from member quotes.
 # - unresolved: something essential is missing or Wise contradicts itself.
 #   Never imported.
 #
@@ -27,6 +27,7 @@ class WiseItem::LedgerReconstructor
   KNOWN_TYPES = (CARD_TYPES + BALANCE_CHARGE_TYPES.keys + %w[CARD_CHECK TRANSFER BALANCE_DEPOSIT INTERBALANCE BATCH_TRANSFER]).freeze
   CONTRADICTS_COMPLETED = [ "pending", "declined", "cancelled", "canceled", "in progress" ].freeze
   BATCH_WINDOW = 15.minutes
+  MEMBER_MATCH_BASIS = "created within 15 minutes; Wise exposes no batch id"
   BALANCE_PAY_IN = "BALANCE"
 
   EXPLICIT = "provider_explicit"
@@ -626,8 +627,11 @@ class WiseItem::LedgerReconstructor
     # --- batch payments -----------------------------------------------------------
 
     # Member transfers carry no batch id anywhere in Wise's API. They are
-    # matched by creation time (within 15 minutes) and never become ledger
-    # legs themselves, so a batch is counted exactly once.
+    # matched by creation time (within 15 minutes). When the members account
+    # for the whole batch, each becomes its own outgoing payment (recipient,
+    # reference, fee, funding balance) and the batch total is not booked on
+    # top. Otherwise the batch stays one debit and the members remain
+    # reference records. Either way a batch is counted exactly once.
     def batch_members(activity)
       at = time(activity["createdOn"])
       return [] unless at
@@ -663,16 +667,6 @@ class WiseItem::LedgerReconstructor
         counterparty_name: Text.strip_tags(activity["title"]).presence
       }
 
-      source_account = lambda do |currency, ms|
-        ids = ms.map { |member| member.dig("quote", "payInId")&.to_s }
-        if ids.any? && ids.all?(&:present?) && ids.uniq.one?
-          account, provenance, basis, bad = stated_balance(ids.first, currency)
-          [ account, provenance, provenance ? "member_quotes_pay_in_id" : basis, bad ]
-        else
-          [ *infer_balance(currency, at), false ]
-        end
-      end
-
       if shown.value && shown.currency
         ms = live.select { |member| member.dig("transfer", "sourceCurrency") == shown.currency }
         member_sum = ms.sum { |member| decimal(member.dig("transfer", "sourceValue")).to_d }
@@ -696,7 +690,11 @@ class WiseItem::LedgerReconstructor
           fee, fee_provenance = fee_sum&.zero? ? [ 0.to_d, EXPLICIT ] : [ nil, nil ]
         end
 
-        account, balance_provenance, basis, bad = source_account.call(shown.currency, ms.presence || live)
+        if members_match && amount && !inconsistent
+          return batch_member_legs(activity, ms, fees: fees, batch_fee: fee, amount_provenance: EXPLICIT)
+        end
+
+        account, balance_provenance, basis, bad = batch_source_account(shown.currency, ms.presence || live, at)
         provenance = combine(amount_provenance, balance_provenance, inconsistent: inconsistent || bad)
         if refunded.any? && provenance != UNRESOLVED
           provenance = UNRESOLVED
@@ -726,57 +724,163 @@ class WiseItem::LedgerReconstructor
           "member_source_sum" => member_sum.to_s,
           "member_fee_sum" => fee_sum&.to_s,
           "members_match_total" => members_match,
-          "member_match_basis" => "created within 15 minutes; Wise exposes no batch id",
+          "member_match_basis" => MEMBER_MATCH_BASIS,
           "refunded_member_ids" => refunded.map { |member| member.dig("transfer", "id").to_s }.presence
         ).compact
         return [ leg ]
       end
 
+      # Wise lists the currencies but no amounts. Members whose quotes state
+      # every fee are booked one by one; a currency with an unknown fee stays
+      # one unresolved debit.
       if Text.currency_list?(activity["primaryAmount"]) && live.any?
-        return live.group_by { |member| member.dig("transfer", "sourceCurrency") }.sort_by(&:first).map do |currency, ms|
+        return live.group_by { |member| member.dig("transfer", "sourceCurrency") }.sort_by(&:first).flat_map do |currency, ms|
           fees = ms.map { |member| quote_fee(member["quote"]) }
-          if fees.any?(&:nil?)
-            amount = fee = nil
-            reason = "member_fee_unknown"
-          else
-            fee = fees.sum
-            amount = ms.sum { |member| decimal(member.dig("transfer", "sourceValue")).to_d } + fee
-            reason = "per_currency_total_from_members"
-          end
-          account, balance_provenance, basis, bad = source_account.call(currency, ms)
-          provenance = combine(amount ? INFERRED : nil, balance_provenance, inconsistent: bad)
-          if refunded.any? && provenance != UNRESOLVED
-            provenance = UNRESOLVED
-            reason = "batch_member_refunded_refund_leg_not_visible"
-          end
+          next batch_member_legs(activity, ms, fees: fees, batch_fee: nil, amount_provenance: INFERRED) if fees.none?(&:nil?)
 
+          account, balance_provenance, = batch_source_account(currency, ms, at)
           leg = base_leg(
             activity, **base,
             key: "activity:#{activity['id']}:#{currency}",
             wise_account: account,
-            amount: signed(amount, "outflow"),
-            currency: amount ? currency : nil,
-            fee_amount: fee,
-            fee_currency: fee ? currency : nil,
             field_provenance: {
-              "amount" => amount ? INFERRED : UNRESOLVED,
+              "amount" => UNRESOLVED,
               "currency" => EXPLICIT,
               "source_balance" => balance_provenance || UNRESOLVED,
-              "fee" => fee ? INFERRED : UNRESOLVED
+              "fee" => UNRESOLVED
             },
-            provenance: provenance,
-            reason: provenance == UNRESOLVED ? reason : "#{reason}_#{basis}"
+            provenance: UNRESOLVED,
+            reason: "member_fee_unknown"
           )
           leg.details = leg.details.merge(
             "member_transfer_ids" => ms.map { |member| member.dig("transfer", "id").to_s },
             "members_match_total" => false,
-            "member_match_basis" => "created within 15 minutes; Wise exposes no batch id"
+            "member_match_basis" => MEMBER_MATCH_BASIS
           )
-          leg
+          [ leg ]
         end
       end
 
       [ base_leg(activity, **base, provenance: UNRESOLVED, reason: "batch_amount_and_members_unknown",
                  details: { "member_transfer_ids" => member_ids }) ]
+    end
+
+    # [account, provenance, basis, inconsistent]: the balance every member's
+    # quote names, or the single balance of the currency.
+    def batch_source_account(currency, members, at)
+      ids = members.map { |member| member.dig("quote", "payInId")&.to_s }
+      if ids.any? && ids.all?(&:present?) && ids.uniq.one?
+        account, provenance, basis, bad = stated_balance(ids.first, currency)
+        [ account, provenance, provenance ? "member_quotes_pay_in_id" : basis, bad ]
+      else
+        [ *infer_balance(currency, at), false ]
+      end
+    end
+
+    # One outgoing payment per member. Each takes its own quote fee when the
+    # quotes account for the batch fee; otherwise the members are booked at
+    # their source value and the batch fee is its own leg.
+    def batch_member_legs(activity, members, fees:, batch_fee:, amount_provenance:)
+      attributable = fees.none?(&:nil?) && (batch_fee.nil? || fees.sum == batch_fee)
+
+      legs = members.each_with_index.map do |member, index|
+        fee, fee_provenance =
+          if attributable then [ fees[index], EXPLICIT ]
+          elsif batch_fee&.zero? then [ 0.to_d, EXPLICIT ]
+          end
+        batch_member_leg(activity, member, fee: fee, fee_provenance: fee_provenance, amount_provenance: amount_provenance)
+      end
+
+      legs << batch_fee_leg(activity, members, batch_fee) if batch_fee&.positive? && !attributable
+      legs
+    end
+
+    def batch_member_leg(activity, member, fee:, fee_provenance:, amount_provenance:)
+      data = member["transfer"]
+      id = data["id"].to_s
+      currency = data["sourceCurrency"]
+      source_value = decimal(data["sourceValue"])
+      amount = source_value && fee ? source_value + fee : source_value
+      amount_provenance = nil if amount.nil?
+
+      pay_in_id = member.dig("quote", "payInId")
+      if pay_in_id.present?
+        account, balance_provenance, basis, bad = stated_balance(pay_in_id, currency)
+        basis = "quote_pay_in_id" if balance_provenance
+      else
+        account, balance_provenance, basis = infer_balance(currency, time(activity["createdOn"]))
+      end
+
+      refunded = data["status"] == "funds_refunded"
+      provenance = refunded ? UNRESOLVED : combine(amount_provenance, balance_provenance, inconsistent: bad)
+      reason =
+        if refunded then "batch_member_refunded_refund_leg_not_visible"
+        elsif amount.nil? then "batch_member_source_value_missing"
+        elsif provenance == UNRESOLVED then basis
+        else "batch_member_#{basis}"
+        end
+
+      leg = base_leg(
+        activity,
+        key: "activity:#{activity['id']}:transfer:#{id}",
+        category: "outgoing_payment",
+        direction: "outflow",
+        wise_account: account,
+        amount: signed(amount, "outflow"),
+        currency: amount ? currency : nil,
+        fee_amount: fee,
+        fee_currency: fee ? currency : nil,
+        original_amount: decimal(data["targetValue"]),
+        original_currency: data["targetCurrency"],
+        counterparty_name: recipient_name(member["recipient"]) || Text.strip_tags(activity["title"]).presence,
+        payment_reference: data["reference"].presence || data.dig("details", "reference").presence,
+        field_provenance: {
+          "amount" => amount_provenance || UNRESOLVED,
+          "currency" => amount_provenance || UNRESOLVED,
+          "source_balance" => balance_provenance || UNRESOLVED,
+          "fee" => fee_provenance || UNRESOLVED
+        },
+        provenance: provenance,
+        reason: reason,
+        details: recipient_details(member).merge(
+          "batch_key" => "activity:#{activity['id']}",
+          "source_value" => source_value&.to_s,
+          "target_value" => decimal(data["targetValue"])&.to_s,
+          "target_currency" => data["targetCurrency"],
+          "rate" => data["rate"]&.to_s,
+          "quote_available" => member["quote"].present?,
+          "balance_basis" => basis,
+          "member_match_basis" => MEMBER_MATCH_BASIS
+        ).compact
+      )
+      leg.resource_type = "TRANSFER"
+      leg.resource_id = id
+      leg.transfer_id = id
+      leg
+    end
+
+    # The batch charged a fee the member quotes do not account for.
+    def batch_fee_leg(activity, members, fee)
+      currency = members.first.dig("transfer", "sourceCurrency")
+      account, balance_provenance, basis, bad = batch_source_account(currency, members, time(activity["createdOn"]))
+      provenance = combine(EXPLICIT, balance_provenance, inconsistent: bad)
+
+      base_leg(
+        activity,
+        key: "activity:#{activity['id']}:fee",
+        category: "batch_fee",
+        direction: "outflow",
+        wise_account: account,
+        amount: signed(fee, "outflow"),
+        currency: currency,
+        counterparty_name: Text.strip_tags(activity["title"]).presence,
+        field_provenance: { "amount" => EXPLICIT, "currency" => EXPLICIT, "source_balance" => balance_provenance || UNRESOLVED },
+        provenance: provenance,
+        reason: provenance == UNRESOLVED ? basis : "batch_fee_not_in_member_quotes_#{basis}",
+        details: {
+          "batch_key" => "activity:#{activity['id']}",
+          "member_transfer_ids" => members.map { |member| member.dig("transfer", "id").to_s }
+        }
+      )
     end
 end

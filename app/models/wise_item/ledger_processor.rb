@@ -56,8 +56,8 @@ class WiseItem::LedgerProcessor
         merchant: merchant,
         kind: kind_for(record),
         extra: extra_for(record),
-        legacy_external_ids: legacy_external_ids(record),
-        legacy_fee_external_ids: legacy_fee_external_ids(record),
+        legacy_external_ids: adoptable(legacy_external_ids(record), record, account),
+        legacy_fee_external_ids: adoptable(legacy_fee_external_ids(record), record, account),
         match_terms: [ record.merchant_name, merchant&.name, record.counterparty_name, record.payment_reference ],
         fee_name: I18n.t("wise_items.entries.fee_name")
       )
@@ -115,6 +115,8 @@ class WiseItem::LedgerProcessor
         I18n.t("wise_items.ledger.conversion", from: record.details["source_currency"], to: record.details["target_currency"])
       when "batch_payment"
         I18n.t("wise_items.ledger.batch_payment", name: record.counterparty_name || record.name)
+      when "batch_fee"
+        I18n.t("wise_items.ledger.batch_fee", name: record.counterparty_name || record.name)
       when "jar_move"
         I18n.t("wise_items.ledger.jar_move", destination: record.details["destination_title"])
       else
@@ -166,6 +168,15 @@ class WiseItem::LedgerProcessor
       return [] unless record.category == "outgoing_payment" && record.provider_resource_id.present?
 
       [ "wise_fee_#{record.provider_resource_id}" ]
+    end
+
+    # While a batch was one debit, the legacy entry of each member was
+    # excluded as a double count (bin/rails wise:legacy_exclude). A member
+    # booked on its own does not adopt that excluded entry; it gets a new one.
+    def adoptable(external_ids, record, account)
+      return external_ids if external_ids.empty? || record.details["batch_key"].blank?
+
+      external_ids - account.entries.where(source: SOURCE, external_id: external_ids, excluded: true).pluck(:external_id)
     end
 
     def kind_for(record)

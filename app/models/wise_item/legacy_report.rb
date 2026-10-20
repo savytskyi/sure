@@ -106,7 +106,7 @@ class WiseItem::LegacyReport
         finding(entry, "refunded_transfer", "transfer #{transfer_id} refunded in full")
       elsif legs.any?
         finding(entry, "duplicate_of_reconstructed_leg", legs.map(&:external_key).join(" "))
-      elsif order&.relationship&.dig("type") == "batch_member"
+      elsif order&.relationship&.dig("type") == "batch_member" && order.relationship["status"] != "unpacked"
         finding(entry, "batch_member_counted_in_batch_debit", order.relationship["batch_key"])
       else
         finding(entry, "no_reconstructed_leg", "transfer #{transfer_id} #{status || 'not in the transfer list'}")

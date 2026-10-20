@@ -138,11 +138,11 @@ class WiseItem::LedgerLinker
 
         if debit
           pair!(relationships, debit, credit, type: relation_type(debit, credit), basis: "same Wise transfer id debited and credited")
-        elsif order&.relationship&.dig("type") == "batch_member"
+        elsif order&.relationship&.dig("type") == "batch_member" && order.relationship["status"] != "unpacked"
           relationships[credit.id] = {
             "type" => relation_type(order, credit), "status" => "confirmed",
             "batch_key" => order.relationship["batch_key"], "transfer_id" => transfer_id,
-            "basis" => "credit carries the Wise transfer id of an own batch member; the batch debit stays one leg"
+            "basis" => "credit carries the Wise transfer id of an own batch member; the batch is one debit"
           }
         elsif order && order.item_id == credit.item_id
           # The profile created this transfer to its own balance (a pay-in

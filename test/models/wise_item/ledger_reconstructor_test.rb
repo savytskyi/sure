@@ -274,50 +274,94 @@ class WiseItem::LedgerReconstructorTest < ActiveSupport::TestCase
 
   # --- batches ------------------------------------------------------------------------
 
-  test "a batch is one debit; members are matched by time and never become legs" do
+  test "a batch whose members add up is booked as one outgoing payment per member" do
     at = "2024-06-30T15:00:00Z"
     transfers = {
-      "8001" => order("8001", profile: "10001", value: 1000, created: "2024-06-30 14:59:30", quote: quote(pay_in_id: 50001, fee: 0.4)),
+      "8001" => order("8001", profile: "10001", value: 1000, created: "2024-06-30 14:59:30", quote: quote(pay_in_id: 50001, fee: 0.4),
+                      recipient: { "name" => { "fullName" => "Alice Example" } }),
       "8002" => order("8002", profile: "10001", value: 2000, created: "2024-06-30 15:01:00", quote: quote(pay_in_id: 50001, fee: 0.8)),
       "8003" => order("8003", profile: "10001", value: 999, created: "2024-06-30 18:00:00")
     }
-    activity = { "id" => "batch-1", "type" => "BATCH_TRANSFER", "status" => "COMPLETED",
-                 "resource" => { "type" => "BATCH_TRANSFER", "id" => "b-1" }, "title" => "<strong>salaries</strong>",
-                 "primaryAmount" => "3,000 EUR", "secondaryAmount" => "3,001.20 EUR", "createdOn" => at }
 
-    leg = only_leg(activity, transfers: transfers)
+    alice, bob = reconstruct([ batch("batch-1", "3,000 EUR", "3,001.20 EUR", at: at) ], transfers: transfers)
 
-    assert_equal BigDecimal("3001.20"), leg.amount
-    assert_equal BigDecimal("1.20"), leg.fee_amount
-    assert_equal %w[8001 8002], leg.details["member_transfer_ids"]
-    assert leg.details["members_match_total"]
-    assert_equal "provider_explicit", leg.provenance
+    assert_equal [ "activity:batch-1:transfer:8001", "outgoing_payment", BigDecimal("1000.4"), BigDecimal("0.4"), @eur ],
+                 [ alice.key, alice.category, alice.amount, alice.fee_amount, alice.wise_account ]
+    assert_equal [ "TRANSFER", "8001", "8001" ], [ alice.resource_type, alice.resource_id, alice.transfer_id ]
+    assert_equal "Alice Example", alice.counterparty_name
+    assert_equal "Ref 8001", alice.payment_reference
+    assert_equal "TRANSFER-8001", alice.statement_reference
+    assert_equal "activity:batch-1", alice.details["batch_key"]
+    assert_equal "provider_explicit", alice.provenance
+    assert_equal [ BigDecimal("2000.8"), "salaries" ], [ bob.amount, bob.counterparty_name ]
   end
 
-  test "a batch with a refunded member is unresolved" do
-    transfers = { "8101" => order("8101", profile: "10001", value: 400, created: "2024-07-01 10:00:00", status: "funds_refunded") }
-    activity = { "id" => "batch-2", "type" => "BATCH_TRANSFER", "status" => "COMPLETED", "title" => "<strong>refund_case</strong>",
-                 "primaryAmount" => "400 EUR", "createdOn" => "2024-07-01T10:00:00Z" }
+  test "a batch whose members do not add up stays one debit" do
+    transfers = { "8011" => order("8011", profile: "10001", value: 1000, created: "2024-06-30 15:00:00", quote: quote(pay_in_id: 50001, fee: 0.4)) }
 
-    leg = only_leg(activity, transfers: transfers)
+    leg = only_leg(batch("batch-4", "3,000 EUR", "3,001.20 EUR"), transfers: transfers)
 
+    assert_equal [ "activity:batch-4", "batch_payment", BigDecimal("3001.20") ], [ leg.key, leg.category, leg.amount ]
+    assert_equal %w[8011], leg.details["member_transfer_ids"]
+    assert_not leg.details["members_match_total"]
+  end
+
+  test "a batch fee the member quotes do not explain is its own leg" do
+    transfers = {
+      "8021" => order("8021", profile: "10001", value: 100, created: "2024-06-30 15:00:00"),
+      "8022" => order("8022", profile: "10001", value: 200, created: "2024-06-30 15:00:05")
+    }
+
+    first, second, fee = reconstruct([ batch("batch-5", "300 EUR", "302 EUR") ], transfers: transfers)
+
+    assert_equal [ BigDecimal("100"), nil ], [ first.amount, first.fee_amount ]
+    assert_equal BigDecimal("200"), second.amount
+    assert_equal [ "activity:batch-5:fee", "batch_fee", BigDecimal("2"), @eur ], [ fee.key, fee.category, fee.amount, fee.wise_account ]
+    assert_equal "inferred", fee.provenance
+  end
+
+  test "a refunded batch member is held for review while the others are booked" do
+    transfers = {
+      "8101" => order("8101", profile: "10001", value: 400, created: "2024-07-01 10:00:00", status: "funds_refunded", quote: quote(pay_in_id: 50001, fee: 0)),
+      "8102" => order("8102", profile: "10001", value: 100, created: "2024-07-01 10:00:00", quote: quote(pay_in_id: 50001, fee: 0))
+    }
+
+    refunded, paid = reconstruct([ batch("batch-2", "500 EUR", nil, at: "2024-07-01T10:00:00Z") ], transfers: transfers)
+
+    assert_equal "unresolved", refunded.provenance
+    assert_equal "batch_member_refunded_refund_leg_not_visible", refunded.reason
+    assert_equal [ "provider_explicit", BigDecimal("100") ], [ paid.provenance, paid.amount ]
+  end
+
+  test "a batch with a refunded member and no matching members is unresolved" do
+    transfers = { "8111" => order("8111", profile: "10001", value: 400, created: "2024-07-01 10:00:00", status: "funds_refunded") }
+
+    leg = only_leg(batch("batch-6", "500 EUR", nil, at: "2024-07-01T10:00:00Z"), transfers: transfers)
+
+    assert_equal "batch_payment", leg.category
     assert_equal "unresolved", leg.provenance
     assert_equal "batch_member_refunded_refund_leg_not_visible", leg.reason
   end
 
-  test "a multi-currency batch is summed per currency from its members" do
+  test "a multi-currency batch is booked per member from their quotes" do
     transfers = {
       "8201" => order("8201", profile: "10001", value: 100, created: "2024-08-01 10:00:00", quote: quote(pay_in_id: 50001, fee: 1)),
       "8202" => order("8202", profile: "10001", value: 50, currency: "USD", created: "2024-08-01 10:00:10", quote: quote(pay_in_id: 50002, fee: 0.5, currency: "USD"))
     }
-    activity = { "id" => "batch-3", "type" => "BATCH_TRANSFER", "status" => "COMPLETED", "title" => "<strong>mixed</strong>",
-                 "primaryAmount" => "EUR, USD", "createdOn" => "2024-08-01T10:00:00Z" }
 
-    eur_leg, usd_leg = reconstruct([ activity ], transfers: transfers)
+    eur_leg, usd_leg = reconstruct([ batch("batch-3", "EUR, USD", nil, at: "2024-08-01T10:00:00Z") ], transfers: transfers)
 
-    assert_equal [ BigDecimal("101"), "EUR", @eur ], [ eur_leg.amount, eur_leg.currency, eur_leg.wise_account ]
-    assert_equal [ BigDecimal("50.5"), "USD", @usd ], [ usd_leg.amount, usd_leg.currency, usd_leg.wise_account ]
+    assert_equal [ BigDecimal("101"), "EUR", @eur, "8201" ], [ eur_leg.amount, eur_leg.currency, eur_leg.wise_account, eur_leg.transfer_id ]
+    assert_equal [ BigDecimal("50.5"), "USD", @usd, "8202" ], [ usd_leg.amount, usd_leg.currency, usd_leg.wise_account, usd_leg.transfer_id ]
     assert_equal "inferred", eur_leg.provenance
+  end
+
+  test "a multi-currency batch member without a quote leaves its currency as one unresolved debit" do
+    transfers = { "8301" => order("8301", profile: "10001", value: 100, created: "2024-08-01 10:00:00") }
+
+    leg = only_leg(batch("batch-7", "EUR, USD", nil, at: "2024-08-01T10:00:00Z"), transfers: transfers)
+
+    assert_equal [ "activity:batch-7:EUR", "batch_payment", "unresolved", "member_fee_unknown" ], [ leg.key, leg.category, leg.provenance, leg.reason ]
   end
 
   test "unknown completed activity types are kept for review" do
@@ -368,6 +412,11 @@ class WiseItem::LedgerReconstructorTest < ActiveSupport::TestCase
       { "id" => "tr-#{id}", "type" => type, "resource" => { "type" => "TRANSFER", "id" => id },
         "title" => title, "description" => "", "primaryAmount" => primary, "secondaryAmount" => secondary,
         "status" => "COMPLETED", "createdOn" => "2024-05-01T10:00:00Z" }
+    end
+
+    def batch(id, primary, secondary, at: "2024-06-30T15:00:00Z")
+      { "id" => id, "type" => "BATCH_TRANSFER", "status" => "COMPLETED", "resource" => { "type" => "BATCH_TRANSFER", "id" => "b-#{id}" },
+        "title" => "<strong>salaries</strong>", "primaryAmount" => primary, "secondaryAmount" => secondary.to_s, "createdOn" => at }
     end
 
     def order(id, value:, profile: "10001", currency: "EUR", created: "2024-05-01 09:59:00", status: "outgoing_payment_sent", quote: nil, recipient: nil)
