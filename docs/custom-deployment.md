@@ -18,7 +18,7 @@ manual dispatch, on GitHub-hosted runners only:
 | `ci` | Calls the upstream `ci.yml` unchanged: Brakeman, importmap audit, Rubocop, Biome, full Rails suite, system tests |
 | `wise` | Wise, provider-ledger, Binance futures, derivative and Kraken tests alone (fast signal) |
 | `migrations` | Loads the schema of the release production runs (`baseline_ref`, default `v0.7.5-hotfix.2`), records exactly that release's migrations, applies every newer one, compares the result with `db/schema.rb`, reverses and reapplies this fork's two migrations, and boots the baseline release's code against the migrated database |
-| `image` | After the three jobs pass: builds the production `Dockerfile` for linux/amd64, tags it `ghcr.io/<owner>/sure:<commit sha>`, smoke-tests it. Pushes **only** on a manual run with `publish: true` |
+| `image` | After the three jobs pass: builds the production `Dockerfile` for linux/amd64, tags it `ghcr.io/<owner>/sure:<commit sha>`, smoke-tests it. Pushes **only** on a manual run with `publish: true` or a pushed `release-<sha>` tag (all three jobs green) |
 
 No Wise, Binance, Sure or other credentials are used; publishing uses the workflow's
 own `GITHUB_TOKEN`. Actions must be enabled for the fork (Settings → Actions).
@@ -26,6 +26,21 @@ Upstream's `publish.yml` only runs for `main`, version tags and its schedule
 (schedules are disabled in forks by default); it is left untouched. Opening a
 PR inside the fork also runs `pr.yml` (the same `ci.yml`), so avoid PRs there
 if the duplicate run matters.
+
+### Publishing a release
+
+GitHub API access is not needed; an SSH push is enough:
+
+```sh
+sha=$(git rev-parse HEAD)          # clean tree, already pushed to origin
+git tag "release-$sha" "$sha" && git push origin "release-$sha"
+```
+
+The tag run repeats every job on that exact commit and publishes
+`ghcr.io/savytskyi/sure:<sha>` only if `ci`, `wise` and `migrations` all
+pass. The step summary prints the digest; the package is public, so the
+homelab pulls it without logging in. A `release-*` tag never deploys
+anything by itself. Tags are not moved or deleted after publication.
 
 ## Image
 
@@ -167,9 +182,12 @@ script, or an `EnvironmentVariables` → `PATH` key in the plist, then
 2. **Verify the backup restores**: steps 2–3 of the procedure above on the
    new dump (`pg_restore --list` alone only checks the archive).
 3. **Stop Sure**: `docker compose -f ~/homelab/compose.yml stop sure-worker sure-web`.
-4. **Pin the image**: in `~/homelab/compose.yml` set, for both `sure-web` and
-   `sure-worker`, `image: ghcr.io/savytskyi/sure:<sha>@sha256:<digest>`
-   (keep the old line commented for rollback). `docker compose pull sure-web`.
+4. **Pin the image**: `~/homelab/compose.yml` stays unchanged. Write
+   `~/homelab/deployments/sure/current.env` (`SURE_IMAGE=ghcr.io/savytskyi/sure:<sha>@sha256:<digest>`,
+   `SURE_GIT_SHA=<sha>`) and run every command below with
+   `--env-file .env --env-file deployments/sure/current.env -f compose.yml -f compose.sure-custom.override.yml`,
+   which gives both `sure-web` and `sure-worker` that one digest (see
+   `~/homelab/SURE_CUSTOM_DEPLOYMENT.md`). Pull before stopping Sure.
 5. **Migrate**: `docker compose run --rm sure-web ./bin/rails db:migrate`
    (the web entrypoint would also run `db:prepare` on start; running it
    explicitly shows the output and stops on error).
