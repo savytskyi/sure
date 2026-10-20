@@ -454,9 +454,9 @@ zh-TW:
         step3: 將您的 API Key 與 Secret 貼到下方
         no_withdraw_title: 只用唯讀金鑰
         no_withdraw_body: 建立 Binance API 金鑰時，請不要啟用提領權限。Sure 只需要讀取權限。
-        ip_hint_title: 需要設定 IP 白名單
-        ip_hint_body: 請將這台應用程式伺服器的對外 IP 加入 Binance API 金鑰的白名單：
-        ip_hint_contact_admin: 請聯絡您的管理員取得應用程式伺服器的對外 IP 位址。
+        ip_hint_title: 建議設定 IP 白名單（選用）
+        ip_hint_body: 為提高安全性，您可以將這台應用程式伺服器的對外 IP 加入 Binance API 金鑰的白名單：
+        ip_hint_contact_admin: 如果您想將此唯讀金鑰限制為僅允許應用程式伺服器的對外 IP，請聯絡您的管理員。
         api_key_label: API 金鑰
         api_key_placeholder: 貼上您的 Binance API Key
         api_secret_label: API 密鑰 (API Secret)

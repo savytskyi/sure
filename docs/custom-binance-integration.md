@@ -21,6 +21,12 @@ Branch: `feature/wise-sync-improvements` (same fork branch as the Wise work).
 ## Endpoints
 
 All signed requests are GETs that need only **Enable Reading**.
+IP restriction is optional for these read-only requests: both Binance's
+`ipRestrict=true` and `ipRestrict=false` key configurations are accepted. The
+integration records that flag for operator visibility but never gates a sync on
+it. Binance's API-management UI requires IP restrictions when enabling
+permissions beyond reading; that UI policy must not be mistaken for a
+requirement of these `USER_DATA` reads.
 
 | Endpoint | Host | Weight | Used for |
 |---|---|---|---|
@@ -43,6 +49,8 @@ Create the key with **Enable Reading only** — no trading, futures trading
 ("Enable Futures"), margin, withdrawals, internal or universal transfer.
 Binance documents `enableFutures` only as a flag of
 `apiRestrictions`, not what it gates; it is not needed for the reads above.
+In particular, `/dapi/v1/account`, `/dapi/v1/positionRisk`, and
+`/dapi/v1/income` are documented as `USER_DATA`, not `TRADE`, endpoints.
 Two Binance behaviours to know:
 
 * A key created **before** the futures account was opened cannot read

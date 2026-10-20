@@ -31,6 +31,27 @@ class BinanceRakeTest < ActiveSupport::TestCase
     assert_match "WARNING: the key can do more than read: enableWithdrawals", out
   end
 
+  test "futures report accepts restricted and unrestricted read-only keys" do
+    [ false, true ].each do |ip_restrict|
+      @item.update!(raw_payload: {
+        "api_restrictions" => {
+          "enableReading" => true,
+          "enableFutures" => false,
+          "enableSpotAndMarginTrading" => false,
+          "enableWithdrawals" => false,
+          "ipRestrict" => ip_restrict
+        }
+      })
+      Rake::Task["binance:futures"].reenable
+
+      out, = capture_io { Rake::Task["binance:futures"].invoke }
+
+      assert_match "enableReading=true", out
+      assert_match "ipRestrict=#{ip_restrict}", out
+      refute_match "WARNING: the key can do more than read", out
+    end
+  end
+
   test "legacy futures fills are reported, and deleted only with FAMILY_ID, CONFIRM and OUT" do
     legacy = legacy_fill("binance_futures_BTCUSDT_1")
     edited = legacy_fill("binance_futures_BTCUSDT_2")

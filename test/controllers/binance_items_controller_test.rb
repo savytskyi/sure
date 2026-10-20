@@ -34,6 +34,16 @@ class BinanceItemsControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, ERB::Util.html_escape("can't be blank")
   end
 
+  test "connection panel presents IP whitelisting as optional for read-only keys" do
+    post binance_items_url,
+         params: { binance_item: { api_key: "", api_secret: "" } },
+         as: :turbo_stream
+
+    assert_includes response.body, "IP whitelisting recommended (optional)"
+    refute_includes response.body, "IP whitelisting required"
+    assert_includes response.body, "Sure only needs read access"
+  end
+
   test "should sync binance item" do
     post sync_binance_item_url(@binance_item)
     assert_response :redirect

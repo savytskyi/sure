@@ -327,11 +327,9 @@ tr:
         disconnect: Bağlantıyı kes
         disconnect_confirm: Binance bağlantısını kesmek istediğinizden emin misiniz?
         historical_import: Geçmiş İçe Aktarma Ayarları
-        ip_hint_body: 'Uygulama sunucusunun çıkış IP adresini Binance API Anahtarı
-          beyaz listesine ekleyin:'
-        ip_hint_contact_admin: Uygulama sunucusunun çıkış IP adresini almak için yöneticinizle
-          iletişime geçin.
-        ip_hint_title: IP beyaz listeye alma gerekli
+        ip_hint_body: 'Ek güvenlik için uygulama sunucusunun çıkış IP adresini Binance API Anahtarı beyaz listesine ekleyebilirsiniz:'
+        ip_hint_contact_admin: Bu salt okunur anahtarı uygulama sunucusunun çıkış IP adresiyle sınırlamak istiyorsanız yöneticinizle iletişime geçin.
+        ip_hint_title: IP beyaz listesi önerilir (isteğe bağlı)
         no_withdraw_body: Binance API anahtarınızı oluştururken çekme izinlerini etkinleştirmeyin.
           Sure yalnızca okuma erişimine ihtiyaç duyar.
         no_withdraw_title: Yalnızca salt okunur anahtar

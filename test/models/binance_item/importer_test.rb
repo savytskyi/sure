@@ -213,6 +213,14 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
     assert_equal false, @item.raw_payload.dig("api_restrictions", "enableWithdrawals")
   end
 
+  test "accepts an unrestricted read-only key" do
+    assert_read_only_key_imports(ip_restrict: false)
+  end
+
+  test "accepts an IP-restricted read-only key" do
+    assert_read_only_key_imports(ip_restrict: true)
+  end
+
   test "an unavailable wallet valuation does not fail the import" do
     @provider.stubs(:get_wallet_balances).raises(Provider::Binance::PermissionError, "no")
 
@@ -232,6 +240,23 @@ class BinanceItem::ImporterTest < ActiveSupport::TestCase
   end
 
   private
+
+    def assert_read_only_key_imports(ip_restrict:)
+      restrictions = {
+        "enableReading" => true,
+        "enableFutures" => false,
+        "enableSpotAndMarginTrading" => false,
+        "enableWithdrawals" => false,
+        "ipRestrict" => ip_restrict
+      }
+      @provider.stubs(:get_api_restrictions).returns(restrictions)
+
+      result = BinanceItem::Importer.new(@item, binance_provider: @provider).import
+
+      assert result[:success]
+      assert_equal ip_restrict, @item.reload.raw_payload.dig("api_restrictions", "ipRestrict")
+      assert_equal [ "BTC" ], payload_symbols
+    end
 
     def payload_assets
       @item.binance_accounts.first.reload.raw_payload["assets"]

@@ -293,9 +293,9 @@ de:
         disconnect: Trennen
         disconnect_confirm: Verbindung zu Binance wirklich trennen?
         historical_import: Einstellungen für den Verlaufsimport
-        ip_hint_body: 'Trag die ausgehende IP-Adresse des App-Servers in die Whitelist des Binance-API-Keys ein:'
-        ip_hint_contact_admin: Frag deine Administration nach der ausgehenden IP-Adresse des App-Servers.
-        ip_hint_title: IP-Freigabe erforderlich
+        ip_hint_body: 'Für zusätzliche Sicherheit kannst du die ausgehende IP-Adresse des App-Servers in die Whitelist des Binance-API-Keys eintragen:'
+        ip_hint_contact_admin: Wende dich an deine Administration, wenn du diesen schreibgeschützten Schlüssel auf die ausgehende IP-Adresse des App-Servers beschränken möchtest.
+        ip_hint_title: IP-Freigabe empfohlen (optional)
         no_withdraw_body: Erlaube beim Anlegen des Binance-API-Keys keine Auszahlungen. Sure braucht nur Lesezugriff.
         no_withdraw_title: Nur Lesezugriff
         setup_instructions: 'Erstelle einen API-Key mit Lesezugriff, um Binance zu verbinden:'

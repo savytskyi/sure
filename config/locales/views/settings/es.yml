@@ -408,9 +408,9 @@ es:
         step3: Pega tu API Key y tu Secret abajo
         no_withdraw_title: Solo claves de lectura
         no_withdraw_body: No actives permisos de retirada al crear tu clave API de Binance. Sure solo necesita acceso de lectura.
-        ip_hint_title: Se requiere lista blanca de IP
-        ip_hint_body: 'Añade la IP de salida del servidor de la aplicación a la lista blanca de la clave API de Binance:'
-        ip_hint_contact_admin: Contacta con tu administrador para obtener la IP de salida del servidor de la aplicación.
+        ip_hint_title: Lista blanca de IP recomendada (opcional)
+        ip_hint_body: 'Para mayor seguridad, puedes añadir la IP de salida del servidor de la aplicación a la lista blanca de la clave API de Binance:'
+        ip_hint_contact_admin: Contacta con tu administrador si quieres restringir esta clave de solo lectura a la IP de salida del servidor de la aplicación.
         api_key_label: API Key
         api_key_placeholder: Pega tu API Key de Binance
         api_secret_label: API Secret

@@ -39,6 +39,40 @@ class BinanceItemTest < ActiveSupport::TestCase
     assert_includes item.errors[:api_secret], "can't be blank"
   end
 
+  test "strips whitespace around credentials" do
+    item = BinanceItem.create!(
+      family: @family,
+      name: "Trimmed Binance",
+      api_key: "  test_key  ",
+      api_secret: "\n test_secret \t"
+    )
+
+    assert_equal "test_key", item.api_key
+    assert_equal "test_secret", item.api_secret
+  end
+
+  test "rejects API keys containing whitespace" do
+    item = BinanceItem.new(
+      family: @family,
+      name: "Malformed Binance",
+      api_key: "not an api key",
+      api_secret: "test_secret"
+    )
+
+    assert_not item.valid?
+    assert_includes item.errors[:api_key], "must be copied exactly and cannot contain spaces or line breaks"
+    refute item.credentials_configured?
+  end
+
+  test "an existing malformed API key does not prevent status updates" do
+    @item.update_columns(api_key: "not an api key")
+    @item.reload
+
+    refute @item.credentials_configured?
+    assert @item.update(status: :requires_update)
+    assert_predicate @item, :requires_update?
+  end
+
   test "active scope excludes scheduled for deletion" do
     @item.update!(scheduled_for_deletion: true)
     refute_includes BinanceItem.active.to_a, @item

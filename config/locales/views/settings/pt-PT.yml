@@ -474,9 +474,9 @@ pt-PT:
         step3: "Cole abaixo a sua Chave de API e Segredo"
         no_withdraw_title: "Apenas chave de leitura"
         no_withdraw_body: "Não ative as permissões de levantamento ao criar a sua chave de API Binance. O Sure precisa apenas de acesso de leitura."
-        ip_hint_title: "Lista de permissões de IP necessária"
-        ip_hint_body: "Adicione o IP de saída do servidor da aplicação à lista de permissões da Chave de API Binance:"
-        ip_hint_contact_admin: "Contacte o seu administrador para obter o endereço IP de saída do servidor da aplicação."
+        ip_hint_title: "Lista de permissões de IP recomendada (opcional)"
+        ip_hint_body: "Para maior segurança, pode adicionar o IP de saída do servidor da aplicação à lista de permissões da Chave de API Binance:"
+        ip_hint_contact_admin: "Contacte o seu administrador se quiser restringir esta chave só de leitura ao endereço IP de saída do servidor da aplicação."
         api_key_label: Chave de API
         api_key_placeholder: Cole a sua Chave de API Binance
         api_secret_label: Segredo de API

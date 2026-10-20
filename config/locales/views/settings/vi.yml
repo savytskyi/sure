@@ -369,9 +369,9 @@ vi:
         step3: "Dán Khóa API và Bí mật vào bên dưới"
         no_withdraw_title: "Chỉ khóa chỉ đọc"
         no_withdraw_body: "Không bật quyền rút tiền khi tạo khóa API Binance. Sure chỉ cần quyền đọc."
-        ip_hint_title: "Yêu cầu danh sách trắng IP"
-        ip_hint_body: "Thêm IP đầu ra của máy chủ ứng dụng vào danh sách trắng Khóa API Binance:"
-        ip_hint_contact_admin: "Liên hệ quản trị viên để lấy địa chỉ IP đầu ra của máy chủ ứng dụng."
+        ip_hint_title: "Khuyến nghị danh sách trắng IP (không bắt buộc)"
+        ip_hint_body: "Để tăng cường bảo mật, bạn có thể thêm IP đầu ra của máy chủ ứng dụng vào danh sách trắng Khóa API Binance:"
+        ip_hint_contact_admin: "Liên hệ quản trị viên nếu bạn muốn giới hạn khóa chỉ đọc này ở địa chỉ IP đầu ra của máy chủ ứng dụng."
         api_key_label: Khóa API
         api_key_placeholder: Dán Khóa API Binance
         api_secret_label: Bí mật API

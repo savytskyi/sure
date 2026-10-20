@@ -3,6 +3,8 @@
 class BinanceItem < ApplicationRecord
   include Syncable, Provided, Unlinking, Encryptable, DestroyableLater
 
+  before_validation :strip_credential_whitespace, if: :credentials_changed?
+
   enum :status, { good: "good", requires_update: "requires_update" }, default: :good
 
   # Encrypt sensitive credentials if ActiveRecord encryption is configured
@@ -15,6 +17,7 @@ class BinanceItem < ApplicationRecord
   validates :name, presence: true
   validates :api_key, presence: true
   validates :api_secret, presence: true
+  validate :api_key_has_no_whitespace, if: :will_save_change_to_api_key?
 
   belongs_to :family
   has_one_attached :logo, dependent: :purge_later
@@ -152,7 +155,7 @@ class BinanceItem < ApplicationRecord
   end
 
   def credentials_configured?
-    api_key.present? && api_secret.present?
+    api_key.present? && api_secret.present? && !api_key.match?(/\s/)
   end
 
   def set_binance_institution_defaults!
@@ -163,4 +166,21 @@ class BinanceItem < ApplicationRecord
       institution_color: "#F0B90B"
     )
   end
+
+  private
+
+    def credentials_changed?
+      will_save_change_to_api_key? || will_save_change_to_api_secret?
+    end
+
+    def strip_credential_whitespace
+      self.api_key = api_key.strip if api_key.is_a?(String)
+      self.api_secret = api_secret.strip if api_secret.is_a?(String)
+    end
+
+    def api_key_has_no_whitespace
+      return if api_key.blank? || !api_key.match?(/\s/)
+
+      errors.add(:api_key, :invalid, message: "must be copied exactly and cannot contain spaces or line breaks")
+    end
 end

@@ -382,11 +382,9 @@ pl:
         disconnect: Rozłącz
         disconnect_confirm: Na pewno rozłączyć Binance?
         historical_import: Ustawienia importu historycznego
-        ip_hint_body: 'Dodaj adres IP wyjściowy serwera aplikacji do białej listy
-          klucza API Binance:'
-        ip_hint_contact_admin: Skontaktuj się z administratorem, aby uzyskać adres
-          IP wyjściowy serwera aplikacji.
-        ip_hint_title: Wymagane dodanie do białej listy IP
+        ip_hint_body: 'Dla większego bezpieczeństwa możesz dodać adres IP wyjściowy serwera aplikacji do białej listy klucza API Binance:'
+        ip_hint_contact_admin: Skontaktuj się z administratorem, jeśli chcesz ograniczyć ten klucz tylko do odczytu do adresu IP wyjściowego serwera aplikacji.
+        ip_hint_title: Zalecane dodanie do białej listy IP (opcjonalne)
         no_withdraw_body: Nie włączaj uprawnień do wypłat podczas tworzenia klucza
           API Binance. Sure potrzebuje tylko dostępu do odczytu.
         no_withdraw_title: Tylko klucz do odczytu

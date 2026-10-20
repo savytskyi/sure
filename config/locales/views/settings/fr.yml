@@ -304,9 +304,9 @@ fr:
         disconnect: Déconnecter
         disconnect_confirm: Êtes-vous sûr(e) de vouloir déconnecter Binance ?
         historical_import: Paramètres d'importation historique
-        ip_hint_body: "Ajoutez l'IP de sortie du serveur de l'application à la liste blanche de la clé API Binance :"
-        ip_hint_contact_admin: Contactez votre administrateur pour obtenir l'adresse IP de sortie du serveur de l'application.
-        ip_hint_title: Liste blanche d'IP requise
+        ip_hint_body: "Pour plus de sécurité, vous pouvez ajouter l'IP de sortie du serveur de l'application à la liste blanche de la clé API Binance :"
+        ip_hint_contact_admin: Contactez votre administrateur si vous souhaitez limiter cette clé en lecture seule à l'adresse IP de sortie du serveur de l'application.
+        ip_hint_title: Liste blanche d'IP recommandée (facultative)
         no_withdraw_body: N'activez pas les permissions de retrait lors de la création de votre clé API Binance. Sure requiert uniquement un accès en lecture.
         no_withdraw_title: Clé en lecture seule uniquement
         no_withdraw_warning: "Attention : n'activez PAS les permissions de retrait"

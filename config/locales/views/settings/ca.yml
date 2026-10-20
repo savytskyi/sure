@@ -282,11 +282,9 @@ ca:
         connect_button: Connecta Binance
         disconnect: Desconnecta
         disconnect_confirm: Segur que vols desconnectar Binance?
-        ip_hint_body: 'Afegeix la IP de sortida del servidor de l''aplicació a la
-          llista blanca de la clau API de Binance:'
-        ip_hint_contact_admin: Contacta amb el teu administrador per obtenir la IP
-          de sortida del servidor de l'aplicació.
-        ip_hint_title: Cal incloure la IP a la llista blanca
+        ip_hint_body: 'Per a més seguretat, pots afegir la IP de sortida del servidor de l''aplicació a la llista blanca de la clau API de Binance:'
+        ip_hint_contact_admin: Contacta amb el teu administrador si vols restringir aquesta clau de només lectura a la IP de sortida del servidor de l'aplicació.
+        ip_hint_title: Es recomana incloure la IP a la llista blanca (opcional)
         no_withdraw_body: No activis permisos de retirada en crear la teva clau API
           de Binance. Sure només necessita accés de lectura.
         no_withdraw_title: Només clau de lectura
